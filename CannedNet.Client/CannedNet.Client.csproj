@@ -15,9 +15,23 @@
         <RootNamespace>CannedNet.Client</RootNamespace>
     </PropertyGroup>
   
+    <!-- GamePath = root of a Rec Room install whose BepInEx/interop/ has been populated.
+         It is intentionally NOT hardcoded here so the repo is distributable. Set it via ONE of:
+           1. a local GamePath.props file (copy GamePath.props.example -> GamePath.props; gitignored)
+           2. a RECROOM_PATH environment variable
+           3. the command line: dotnet build -p:GamePath="D:\Path\To\RecRoom" -->
+    <Import Project="$(MSBuildThisFileDirectory)GamePath.props" Condition="Exists('$(MSBuildThisFileDirectory)GamePath.props')" />
+
     <PropertyGroup>
-        <GamePath>C:\Program Files (x86)\Steam\steamapps\content\app_471710\cannednet2023</GamePath>
+        <GamePath Condition="'$(GamePath)' == '' and '$(RECROOM_PATH)' != ''">$(RECROOM_PATH)</GamePath>
     </PropertyGroup>
+
+    <Target Name="ValidateGamePath" BeforeTargets="ResolveAssemblyReferences;Build">
+        <Error Condition="'$(GamePath)' == ''"
+               Text="GamePath is not set. Copy GamePath.props.example to GamePath.props and set your Rec Room install path (or set the RECROOM_PATH env var, or pass -p:GamePath=...). See CLAUDE.md." />
+        <Error Condition="'$(GamePath)' != '' and !Exists('$(GamePath)\BepInEx\interop')"
+               Text="GamePath '$(GamePath)' has no BepInEx\interop folder. Point it at a Rec Room install that has been launched once under BepInEx so the IL2CPP interop assemblies are generated." />
+    </Target>
 
     <ItemGroup>
         <PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.*" IncludeAssets="compile"/>
@@ -926,4 +940,9 @@
         <HintPath>$(GamePath)\BepInEx\interop\XboxUWP.dll</HintPath>
       </Reference>
     </ItemGroup>
+
+    <Target Name="DeployPlugin" AfterTargets="Build">
+        <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(GamePath)\BepInEx\plugins\" />
+    </Target>
+
 </Project>
