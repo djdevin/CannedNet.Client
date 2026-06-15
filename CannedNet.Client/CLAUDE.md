@@ -55,9 +55,11 @@ redirection. The independent pieces:
    header, body via `GetEntityBody()`) through `Plugin.Log` for debugging — note this writes
    bearer tokens to the log in plaintext.
 
-2. **`Patches/PhotonPatches.cs`** — patches the game method that returns Photon
-   `AppSettings`, overwriting it with custom Photon App IDs / NameServer so multiplayer
-   (Photon Realtime/Voice/Chat) connects to the custom backend instead of official Photon.
+2. **`Patches/PhotonPatches.cs`** — postfixes the obfuscated getter that returns Photon
+   `AppSettings` (`GPFPFDBGCEK.AMOHMPKKGHL`), overwriting it in place with the custom Photon
+   App IDs (from `[Photon]` config), region `us`, UDP, and — in advanced mode — the custom
+   Photon NameServer, so multiplayer (Realtime/Voice/Chat) connects to the custom backend
+   instead of official Photon.
 
 3. **`Patches/EACPatches.cs`** — neutralizes Easy Anti-Cheat (`RecRoom.AntiCheat.EACManager`):
    forces its readiness check to return `true` and stubs `GenerateChallengeResponse` to echo
@@ -67,27 +69,43 @@ redirection. The independent pieces:
    (BouncyCastle) to no-op, disabling server certificate validation so the custom server's
    certs aren't rejected.
 
-5. **`Plugin.OnSceneLoaded`** — on every scene load, destroys the `[CheatManager]`
+5. **`Patches/FileSignaturePatch.cs`** — neutralizes Rec Room's game-file signature check
+   (obfuscated type `JAPJPGNBMNM`). The mod's presence perturbs a game file enough that its
+   signature no longer matches the signed manifest, throwing
+   `JAPJPGNBMNM.HOOLEAJINMJ` ("Signatures don't match!"). The patch postfixes the failure-result
+   factory `AOFCCEACNNA.PNEAHABDBHH(Exception)` to instead return the parameterless success
+   result `AOFCCEACNNA.JGIHNLEFJEL()`, so the check always passes.
+
+6. **`Patches/GameConfigFlagPatch.cs`** — guards a game-config / feature-flag getter
+   (`GOBAHJBPPEM.HJLNMINPFNG`, il2cpp getter `LBPOALIGKJL`) that reads a config-backed
+   `Nullable<bool>.Value`. The backend's `/api/gameconfigs/v1/all` doesn't supply that key, so
+   the nullable is empty and every read throws `InvalidOperationException` ("Nullable object must
+   have a value") — it surfaced via `LeaderboardView`'s scheduled update requeuing forever. The
+   prefix returns `false` (feature off) and skips the original. The correct alternative fix is to
+   add the missing key to the backend's gameconfigs.
+
+7. **`Plugin.OnSceneLoaded`** — on every scene load, destroys the `[CheatManager]`
    GameObject (`GameRoot/(Startup)(Clone)/Core Systems/[CheatManager]`) if present so it
    doesn't interfere.
 
 ### Obfuscated game symbols — the main maintenance hazard
 
 Rec Room ships with obfuscated type/method names that **change between game builds**, and
-this is the single biggest source of breakage after a game update. Two patches depend on
-these unstable names:
+this is the single biggest source of breakage after a game update. Several patches are bound
+directly to these unstable names via `[HarmonyPatch]` attributes, so a renamed symbol throws at
+patch time and aborts the whole plugin load — re-find and update the name when that happens:
 
-- `PhotonPatches.cs` targets the obfuscated method on `PUNNetworkManager` that returns Photon
-  `AppSettings` (historically `FJOLIPKKIBE`, then `FOMEIIMJMKH`, …). Rather than hardcode the
-  name, it resolves the target **by return type** in `FindAppSettingsMethod()` — the static
-  method on `PUNNetworkManager` whose return type is `AppSettings` (the only one; the chat
-  variant returns `ChatAppSettings`). This is wired through `Prepare()`/`TargetMethod()`, which
-  log an error and skip the patch if the type or method isn't found, so the patch survives the
-  per-build rename without code changes.
-- `EACPatches.cs` targets `EACManager.FJLMLEPOKGE` (the readiness check, a static
-  parameterless `bool`) and `EACManager.GenerateChallengeResponse`. These are bound directly
-  via `[HarmonyPatch]` attributes, so a renamed method here throws at patch time and aborts
-  the whole plugin load — re-find and update the name when that happens.
+- `PhotonPatches.cs` targets `GPFPFDBGCEK.AMOHMPKKGHL` — the obfuscated getter returning Photon
+  `AppSettings` (historically `PUNNetworkManager.FJOLIPKKIBE`, then `FOMEIIMJMKH`, …; the connect
+  path now goes through this getter). It's the static/virtual method whose return type is
+  `AppSettings` (the chat variant returns `ChatAppSettings`).
+- `EACPatches.cs` targets `EACManager.FJLMLEPOKGE` (the readiness check, a static parameterless
+  `bool`) and `EACManager.GenerateChallengeResponse`.
+- `FileSignaturePatch.cs` targets `JAPJPGNBMNM.AOFCCEACNNA.PNEAHABDBHH(Exception)` — the failure
+  factory of the file-check result type `AOFCCEACNNA`. `JGIHNLEFJEL()` is that type's parameterless
+  (success) factory and `JAPJPGNBMNM.HOOLEAJINMJ` is the "Signatures don't match!" exception.
+- `GameConfigFlagPatch.cs` targets `GOBAHJBPPEM.HJLNMINPFNG` (a static `bool` getter, il2cpp name
+  `LBPOALIGKJL`) — the one that throws `InvalidOperationException` on an unset config `Nullable<bool>`.
 
 **Re-finding a renamed symbol:** decompile the current build's interop stubs with `ilspycmd`
 (`dotnet tool install --global ilspycmd`), e.g.
