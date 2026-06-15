@@ -28,6 +28,9 @@ public class Plugin : BasePlugin
     public static ConfigEntry<int> PhotonPort { get; private set; }
     public static ConfigEntry<bool> Debug { get; private set; }
 
+    // Scene on which CheatManager is destroyed (see OnSceneLoaded).
+    private const string CheatManagerKillScene = "dormroom2";
+
     public override void Load()
     {
         Log = base.Log;
@@ -42,12 +45,17 @@ public class Plugin : BasePlugin
         Debug = Config.Bind("Advanced", "Debug", false, "Show debug logs (HTTP tracing, etc. WARNING: will include sensitive information such as passwords and auth tokens in the logs, be careful when sharing them!)");
 
         Harmony.CreateAndPatchAll(typeof(Plugin).Assembly);
-        
         SceneManager.sceneLoaded += (Action<Scene, LoadSceneMode>)OnSceneLoaded;
     }
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
+        // Keep CheatManager (the DUID service) alive through the whole pre-room flow so account
+        // creation / login works; only destroy it once we reach the dorm, after which it stays gone
+        // for the session (leaving it alive in rooms crashes the game).
+        if (!string.Equals(scene.name, CheatManagerKillScene, StringComparison.OrdinalIgnoreCase))
+            return;
+
         var cheatMgr = GameObject.Find("GameRoot/(Startup)(Clone)/Core Systems/[CheatManager]");
         if (cheatMgr != null)
         {

@@ -80,17 +80,27 @@ redirection. The independent pieces:
    factory `AOFCCEACNNA.PNEAHABDBHH(Exception)` to instead return the parameterless success
    result `AOFCCEACNNA.JGIHNLEFJEL()`, so the check always passes.
 
-6. **`Patches/GameConfigFlagPatch.cs`** — guards a game-config / feature-flag getter
-   (`GOBAHJBPPEM.HJLNMINPFNG`, il2cpp getter `LBPOALIGKJL`) that reads a config-backed
-   `Nullable<bool>.Value`. The backend's `/api/gameconfigs/v1/all` doesn't supply that key, so
-   the nullable is empty and every read throws `InvalidOperationException` ("Nullable object must
-   have a value") — it surfaced via `LeaderboardView`'s scheduled update requeuing forever. The
-   prefix returns `false` (feature off) and skips the original. The correct alternative fix is to
-   add the missing key to the backend's gameconfigs.
+6. **`CheatManager` handling — `Plugin.OnSceneLoaded`.**
+   `CheatManager` is RecRoom's cheat-detection singleton, but it **also implements the DUID
+   device-ID service** (the concrete `PGECJHKNIEN` DI dependency:
+   `CheckForDUIDMismatch`/`WriteDUIDs`/`ClearDUIDs`). Two competing constraints:
+   - Leaving it alive in a **room** crashes the game (the game exits — confirmed via crash dump);
+     destroying it fixes that.
+   - Destroying it removes the DUID service from the DI container, which breaks account
+     creation / login (`ArgumentException: No dependency of type PGECJHKNIEN found`).
 
-7. **`Plugin.OnSceneLoaded`** — on every scene load, destroys the `[CheatManager]`
-   GameObject (`GameRoot/(Startup)(Clone)/Core Systems/[CheatManager]`) if present so it
-   doesn't interfere.
+   Resolution: **keep CheatManager alive through the whole pre-room flow (so DUID works) and
+   destroy it once we reach the dorm.** `Plugin.OnSceneLoaded` destroys the `[CheatManager]`
+   GameObject only when the loaded scene is `dormroom2` (`Plugin.CheatManagerKillScene`); since
+   it's a singleton it stays gone for the rest of the session, so all later rooms are safe and
+   account creation/login (which happen before any room) still have the DUID service. The scene
+   name is hardcoded; `OnSceneLoaded` logs `scene loaded: <name>` to make it easy to re-find.
+   (Neutralizing CheatManager's detection methods in-place instead of destroying it was tried and
+   did **not** prevent the room crash, so that approach was dropped.)
+
+(`Patches/GameConfigFlagPatch.csx` is parked — renamed to `.csx` so it's excluded from the build.
+It forced `GOBAHJBPPEM.HJLNMINPFNG` to `false` to stop a `Nullable.Value` throw from
+`LeaderboardView`, but that's currently disabled.)
 
 ### Obfuscated game symbols — the main maintenance hazard
 
@@ -108,8 +118,6 @@ patch time and aborts the whole plugin load — re-find and update the name when
 - `FileSignaturePatch.cs` targets `JAPJPGNBMNM.AOFCCEACNNA.PNEAHABDBHH(Exception)` — the failure
   factory of the file-check result type `AOFCCEACNNA`. `JGIHNLEFJEL()` is that type's parameterless
   (success) factory and `JAPJPGNBMNM.HOOLEAJINMJ` is the "Signatures don't match!" exception.
-- `GameConfigFlagPatch.cs` targets `GOBAHJBPPEM.HJLNMINPFNG` (a static `bool` getter, il2cpp name
-  `LBPOALIGKJL`) — the one that throws `InvalidOperationException` on an unset config `Nullable<bool>`.
 
 **Re-finding a renamed symbol:** decompile the current build's interop stubs with `ilspycmd`
 (`dotnet tool install --global ilspycmd`), e.g.
