@@ -77,9 +77,13 @@ Rec Room ships with obfuscated type/method names that **change between game buil
 this is the single biggest source of breakage after a game update. Two patches depend on
 these unstable names:
 
-- `PhotonPatches.cs` targets a method named `FJOLIPKKIBE` on `PUNNetworkManager` (the one
-  returning Photon `AppSettings`). It resolves this reflectively in `Prepare()`/`TargetMethod()`,
-  logging an error and skipping the patch if not found, precisely because the name is unstable.
+- `PhotonPatches.cs` targets the obfuscated method on `PUNNetworkManager` that returns Photon
+  `AppSettings` (historically `FJOLIPKKIBE`, then `FOMEIIMJMKH`, …). Rather than hardcode the
+  name, it resolves the target **by return type** in `FindAppSettingsMethod()` — the static
+  method on `PUNNetworkManager` whose return type is `AppSettings` (the only one; the chat
+  variant returns `ChatAppSettings`). This is wired through `Prepare()`/`TargetMethod()`, which
+  log an error and skip the patch if the type or method isn't found, so the patch survives the
+  per-build rename without code changes.
 - `EACPatches.cs` targets `EACManager.FJLMLEPOKGE` (the readiness check, a static
   parameterless `bool`) and `EACManager.GenerateChallengeResponse`. These are bound directly
   via `[HarmonyPatch]` attributes, so a renamed method here throws at patch time and aborts

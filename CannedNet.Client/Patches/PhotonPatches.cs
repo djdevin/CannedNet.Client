@@ -6,83 +6,30 @@ using Photon.Realtime;
 
 namespace CannedNet.Client.Patches;
 
-[HarmonyPatch]
-public class Photon_AppSettings_Patch
+[HarmonyPatch(typeof(GPFPFDBGCEK), "AMOHMPKKGHL")]
+public class PhotonPatches
 {
-    private static bool Prepare()
-    {
-        var type = Type.GetType("PUNNetworkManager");
-        if (type == null)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                type = asm.GetType("PUNNetworkManager");
-                if (type != null) break;
-            }
-        }
-
-        if (type == null)
-        {
-            Plugin.Log.LogError("Could not find PUNNetworkManager type");
-            return false;
-        }
-
-        var method = type.GetMethod("FJOLIPKKIBE", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
-        if (method == null)
-        {
-            Plugin.Log.LogError("Could not find FJOLIPKKIBE method");
-            return false;
-        }
-
-        return true;
-    }
-
-    private static MethodBase TargetMethod()
-    {
-        var type = Type.GetType("PUNNetworkManager");
-        if (type == null)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                type = asm.GetType("PUNNetworkManager");
-                if (type != null) break;
-            }
-        }
-
-        return type?.GetMethod("FJOLIPKKIBE", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
-    }
-
+    [HarmonyPostfix]
     private static void Postfix(ref AppSettings __result)
     {
         Plugin.Log.LogInfo("okay im patching now");
 
-        if (Plugin.EnableAdvancedSettings.Value)
+        if (__result != null)
         {
-            __result = new()
+            __result.AppIdRealtime = Plugin.AppIdRT.Value;
+            __result.AppIdVoice = Plugin.AppIdVoice.Value;
+            __result.AppIdChat = Plugin.AppIdChat.Value;
+            __result.FixedRegion = "us";
+            __result.UseNameServer = true;
+            __result.Protocol = ConnectionProtocol.Udp;
+
+            if (Plugin.EnableAdvancedSettings.Value)
             {
-                AppVersion = __result?.AppVersion,
-                AppIdRealtime = Plugin.AppIdRT.Value,
-                AppIdVoice = Plugin.AppIdVoice.Value,
-                AppIdChat = Plugin.AppIdChat.Value,
-                FixedRegion = "us",
-                UseNameServer = true,
-                Protocol = ConnectionProtocol.Udp,
-                Server = Plugin.PhotonHostname.Value,
-                Port = Plugin.PhotonPort.Value == 0 ? 4533 : Plugin.PhotonPort.Value
-            };
-        }
-        else
-        {
-            __result = new()
-            {
-                AppVersion = __result?.AppVersion,
-                AppIdRealtime = Plugin.AppIdRT.Value,
-                AppIdVoice = Plugin.AppIdVoice.Value,
-                AppIdChat = Plugin.AppIdChat.Value,
-                FixedRegion = "us",
-                UseNameServer = true,
-                Protocol = ConnectionProtocol.Udp
-            };   
+                __result.Server = Plugin.PhotonHostname.Value;
+                __result.Port = Plugin.PhotonPort.Value == 0
+                    ? 4533
+                    : Plugin.PhotonPort.Value;
+            }
         }
     }
 }
