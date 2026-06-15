@@ -18,7 +18,7 @@ public class FileSignatureCheckPatch
 {
     private static void Postfix(ref global::JAPJPGNBMNM.AOFCCEACNNA __result)
     {
-        __result = global::JAPJPGNBMNM.AOFCCEACNNA.JGIHNLEFJEL();
+        //__result = global::JAPJPGNBMNM.AOFCCEACNNA.JGIHNLEFJEL();
 
         if (Plugin.Debug.Value)
             Plugin.Log.LogInfo("[FileSig] converted file-check failure result -> success");

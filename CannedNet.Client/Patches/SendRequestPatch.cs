@@ -11,12 +11,34 @@ public class SendRequestPatch
     // api.rec.net, cdn.rec.net, ...) gets its root swapped for the custom server's root.
     private const string OfficialRoot = "rec.net";
 
+    // Amplitude telemetry host; redirected to the custom datacollection service (see Prefix).
+    private const string AmplitudeHost = "api2.amplitude.com";
+
+    // Noisy/uninteresting endpoints to skip when HTTP-logging (telemetry spam). The host rewrite
+    // still applies to these — only the logging is suppressed.
+    private static readonly string[] LogIgnoreSubstrings =
+    {
+        "datacollection",
+        "/api/gamesight/event",
+        "api2.amplitude.com",
+    };
+
+    private static bool IsIgnoredForLogging(string url)
+    {
+        foreach (var s in LogIgnoreSubstrings)
+            if (url.Contains(s, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
+    }
+
     [HarmonyPatch(typeof(HTTPManager), "SendRequest", [typeof(HTTPRequest)])]
     public class ConnectToRecNetPatch
     {
         private static void Prefix(ref HTTPRequest request)
         {
-            if (Plugin.Debug.Value)
+            var debug = Plugin.Debug.Value && !IsIgnoredForLogging(request.Uri.AbsoluteUri);
+
+            if (debug)
             {
                 var entityBody = request.GetEntityBody();
                 var body = entityBody != null
@@ -29,23 +51,33 @@ public class SendRequestPatch
             }
 
             var host = request.Uri.Host;
+            string newHost = null;
             if (host == OfficialRoot || host.EndsWith("." + OfficialRoot))
             {
                 // Preserve the subdomain, swap only the root: api.rec.net -> api.my.new-rec.net
-                var newHost = host.Substring(0, host.Length - OfficialRoot.Length) + GetBaseDomain();
+                newHost = host.Substring(0, host.Length - OfficialRoot.Length) + GetBaseDomain();
+            }
+            else if (host == AmplitudeHost)
+            {
+                // Amplitude telemetry hits real Amplitude (400 invalid_api_key) and Unity errors
+                // on it; redirect to our datacollection service so the backend can swallow it.
+                newHost = "datacollection." + GetBaseDomain();
+            }
 
+            if (newHost != null)
+            {
                 var uri = request.Uri;
                 var port = uri.IsDefaultPort ? "" : $":{uri.Port}";
                 var newUrl = $"{uri.Scheme}://{newHost}{port}{uri.PathAndQuery}";
 
-                if (Plugin.Debug.Value)
+                if (debug)
                 {
                     Plugin.Log.LogInfo($"[HTTP] intercepted {host} -> {newHost}");
                 }
                 request.Uri = new Il2CppSystem.Uri(newUrl);
             }
 
-            if (Plugin.Debug.Value)
+            if (debug)
             {
                 LogResponseWhenDone(request);
                 CaptureSentHeaders(request);
@@ -107,10 +139,6 @@ public class SendRequestPatch
             request.Callback = DelegateSupport.ConvertDelegate<OnRequestFinishedDelegate>(
                 (Action<HTTPRequest, HTTPResponse>)((req, resp) =>
                 {
-                    // By now BestHTTP's before-send callback has run, so headers RecNet adds
-                    // lazily (e.g. Authorization) are populated on the request — log them here.
-                    Plugin.Log.LogInfo($"[HTTP] -> headers for {url}: {DumpHeaders(req)}");
-
                     if (resp == null)
                         Plugin.Log.LogWarning($"[HTTP] <- {url} NO RESPONSE (state={req.State})");
                     else
@@ -128,22 +156,6 @@ public class SendRequestPatch
         {
             Plugin.Log.LogError($"[HTTP] failed to attach response logger: {e}");
         }
-    }
-
-    // Enumerates all headers currently on the request (BestHTTP's own enumeration, no
-    // before-send re-invoke) into a single "Name: v1,v2; Name2: v3" string for logging.
-    private static string DumpHeaders(HTTPRequest req)
-    {
-        var sb = new System.Text.StringBuilder();
-        req.EnumerateHeaders(DelegateSupport.ConvertDelegate<OnHeaderEnumerationDelegate>(
-            (Action<string, Il2CppSystem.Collections.Generic.List<string>>)((name, values) =>
-            {
-                sb.Append(name).Append(": ");
-                for (int i = 0; i < values.Count; i++)
-                    sb.Append(i > 0 ? "," : "").Append(values[i]);
-                sb.Append("; ");
-            })));
-        return sb.Length == 0 ? "<none>" : sb.ToString();
     }
 
     // Base domain of the custom server: the configured host with the leading "ns." stripped.

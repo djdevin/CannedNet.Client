@@ -15,6 +15,8 @@ namespace CannedNet.Client.Patches;
 //
 // Obfuscated names change per game build; re-find HJLNMINPFNG (the throwing static bool getter on
 // GOBAHJBPPEM) with ilspycmd if the build updates.
+//
+// @TODO: not sure if this is a blocker to joining a room
 [HarmonyPatch(typeof(global::GOBAHJBPPEM), "HJLNMINPFNG", MethodType.Getter)]
 public class GameConfigFlagPatch
 {

@@ -51,9 +51,13 @@ redirection. The independent pieces:
    `api.rec.net`, `cdn.rec.net`, …) to the custom server, preserving the subdomain, port,
    and path: `api.rec.net/foo` → `api.my.new-rec.net/foo`. The replacement root is derived
    from `Plugin.ServerHostname` by parsing its host and stripping a leading `ns.`
-   (`GetBaseDomain()`). The prefix also logs every request (method, URL, `Authorization`
-   header, body via `GetEntityBody()`) through `Plugin.Log` for debugging — note this writes
-   bearer tokens to the log in plaintext.
+   (`GetBaseDomain()`). When `[Advanced] Debug` is on, the prefix also traces each request
+   (method, URL, body via `GetEntityBody()`), its response (status + body, via a wrapped
+   `Callback`), and the headers actually written to the socket (`CaptureSentHeaders` tees
+   BestHTTP's `OnSendingHeaders` — this is the only place the lazily-added `Authorization`
+   bearer is visible, so it logs tokens in plaintext). Noisy telemetry endpoints
+   (`IsIgnoredForLogging`: `datacollection`, `/api/gamesight/event`) are skipped for logging
+   but still rewritten. The host rewrite itself is always active regardless of `Debug`.
 
 2. **`Patches/PhotonPatches.cs`** — postfixes the obfuscated getter that returns Photon
    `AppSettings` (`GPFPFDBGCEK.AMOHMPKKGHL`), overwriting it in place with the custom Photon
