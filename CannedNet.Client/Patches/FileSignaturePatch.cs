@@ -18,9 +18,13 @@ public class FileSignatureCheckPatch
 {
     private static void Postfix(ref global::JAPJPGNBMNM.AOFCCEACNNA __result)
     {
+        // Doesn't seem required, maybe with EAC enabled?
+        // It does throow this:
+        // [Error  :     Unity] [08:47:53] [3139] [103.4982] [Error] [Error] File check failed JAPJPGNBMNM+HOOLEAJINMJ: Error validating file sharedassets74.assets: Signatures don't match!
+        // That gets reported to playerreporting but of course we don't implement that.
         //__result = global::JAPJPGNBMNM.AOFCCEACNNA.JGIHNLEFJEL();
 
         if (Plugin.Debug.Value)
-            Plugin.Log.LogInfo("[FileSig] converted file-check failure result -> success");
+            Plugin.Log.LogInfo("[FileSig] would have converted file-check failure result -> success");
     }
 }
