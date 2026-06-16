@@ -28,9 +28,6 @@ public class Plugin : BasePlugin
     public static ConfigEntry<int> PhotonPort { get; private set; }
     public static ConfigEntry<bool> Debug { get; private set; }
 
-    // Scene on which CheatManager is destroyed (see OnSceneLoaded).
-    private const string CheatManagerKillScene = "dormroom2";
-
     public override void Load()
     {
         Log = base.Log;
@@ -50,17 +47,21 @@ public class Plugin : BasePlugin
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        // Keep CheatManager (the DUID service) alive through the whole pre-room flow so account
-        // creation / login works; only destroy it once we reach the dorm, after which it stays gone
-        // for the session (leaving it alive in rooms crashes the game).
-        if (!string.Equals(scene.name, CheatManagerKillScene, StringComparison.OrdinalIgnoreCase))
-            return;
+        Log.LogInfo($"Scene loaded: {scene.name} (buildIndex={scene.buildIndex})");
 
+        // CheatManager boots us out of rooms when it runs, but it's ALSO the DUID service the DI
+        // container resolves for account creation / login (destroying it removes that service).
+        // So instead of destroying it, *deactivate* the GameObject: it stops running (no Update /
+        // coroutines, so no boot) while the component still exists, so the DI container can still
+        // resolve PGECJHKNIEN and call its DUID methods. It's recreated per scene, so deactivate
+        // each freshly-spawned (active) instance on every load. (GameObject.Find only returns active
+        // objects, so once deactivated it isn't found again.)
         var cheatMgr = GameObject.Find("GameRoot/(Startup)(Clone)/Core Systems/[CheatManager]");
         if (cheatMgr != null)
         {
-            GameObject.Destroy(cheatMgr);
-            Log.LogInfo("cheatmanager destroyed");
+            cheatMgr.SetActive(false);
+            //GameObject.Destroy(cheatMgr);
+            Log.LogInfo("cheatmanager deactivated");
         }
     }
 }

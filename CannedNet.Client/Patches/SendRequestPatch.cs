@@ -106,7 +106,7 @@ public class SendRequestPatch
                         var mem = new Il2CppSystem.IO.MemoryStream();
                         orig.Invoke(req, mem);
                         var bytes = mem.ToArray();
-                        Plugin.Log.LogInfo($"[HTTP] -> wire headers for {url}: {System.Text.Encoding.UTF8.GetString(bytes)}");
+                        //Plugin.Log.LogInfo($"[HTTP] -> wire headers for {url}: {System.Text.Encoding.UTF8.GetString(bytes)}");
                         if (bytes.Length > 0) realStream.Write(bytes, 0, bytes.Length);
                         forwarded = true;
                     }

@@ -89,14 +89,16 @@ redirection. The independent pieces:
    - Destroying it removes the DUID service from the DI container, which breaks account
      creation / login (`ArgumentException: No dependency of type PGECJHKNIEN found`).
 
-   Resolution: **keep CheatManager alive through the whole pre-room flow (so DUID works) and
-   destroy it once we reach the dorm.** `Plugin.OnSceneLoaded` destroys the `[CheatManager]`
-   GameObject only when the loaded scene is `dormroom2` (`Plugin.CheatManagerKillScene`); since
-   it's a singleton it stays gone for the rest of the session, so all later rooms are safe and
-   account creation/login (which happen before any room) still have the DUID service. The scene
-   name is hardcoded; `OnSceneLoaded` logs `scene loaded: <name>` to make it easy to re-find.
-   (Neutralizing CheatManager's detection methods in-place instead of destroying it was tried and
-   did **not** prevent the room crash, so that approach was dropped.)
+   Resolution: **keep CheatManager alive on the login / account-creation scenes and destroy it on
+   every other scene.** `Plugin.OnSceneLoaded` destroys the `[CheatManager]` GameObject on every
+   scene load whose name is not in `Plugin.CheatManagerKeepScenes` (`main_root`, `late_main_root`,
+   `TitleScreen`, `empty`; a null/empty name also keeps it). **CheatManager is recreated per scene**
+   (not a persistent singleton), so this must run on *every* load to kill the respawned instance —
+   destroying it once (e.g. on title-screen unload) was tried and the game still booted you because
+   it came back in the room. Keeping it on the early/login scenes leaves the DUID service available
+   for account creation/login. The scene names are hardcoded; `OnSceneLoaded` logs `Scene loaded:
+   <name>` to make them easy to re-find. (Neutralizing CheatManager's detection methods in-place
+   instead of destroying it was also tried and did **not** prevent the room crash.)
 
 (`Patches/GameConfigFlagPatch.csx` is parked — renamed to `.csx` so it's excluded from the build.
 It forced `GOBAHJBPPEM.HJLNMINPFNG` to `false` to stop a `Nullable.Value` throw from
