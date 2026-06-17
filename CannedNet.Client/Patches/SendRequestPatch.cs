@@ -5,17 +5,19 @@ using Il2CppInterop.Runtime;
 
 namespace CannedNet.Client.Patches;
 
+/**
+    Intercept a variety of HTTP requests and rewrite them to point to our own custom server.
+ */
 public class SendRequestPatch
 {
     // Official root domain to redirect away from. Any host under it (ns.rec.net,
     // api.rec.net, cdn.rec.net, ...) gets its root swapped for the custom server's root.
     private const string OfficialRoot = "rec.net";
 
-    // Amplitude telemetry host; redirected to the custom datacollection service (see Prefix).
+    // Amplitude telemetry host; redirected to the custom datacollection service.
     private const string AmplitudeHost = "api2.amplitude.com";
 
-    // Noisy/uninteresting endpoints to skip when HTTP-logging (telemetry spam). The host rewrite
-    // still applies to these — only the logging is suppressed.
+    // Skip when HTTP-logging so we don't spam the logs.
     private static readonly string[] LogIgnoreSubstrings =
     {
         "datacollection",
@@ -106,6 +108,7 @@ public class SendRequestPatch
                         var mem = new Il2CppSystem.IO.MemoryStream();
                         orig.Invoke(req, mem);
                         var bytes = mem.ToArray();
+                        // Uncomment if you need to see the raw headers in the logs.
                         //Plugin.Log.LogInfo($"[HTTP] -> wire headers for {url}: {System.Text.Encoding.UTF8.GetString(bytes)}");
                         if (bytes.Length > 0) realStream.Write(bytes, 0, bytes.Length);
                         forwarded = true;
