@@ -43,9 +43,16 @@ public class SendRequestPatch
             if (debug)
             {
                 var entityBody = request.GetEntityBody();
-                var body = entityBody != null
-                    ? System.Text.Encoding.UTF8.GetString(entityBody)
-                    : "<none>";
+                string body;
+                if (entityBody == null)
+                    body = "<none>";
+                else if (IsBinaryContentType(request.GetFirstHeaderValue("content-type")) || LooksBinary(entityBody))
+                    body = "<binary>";
+                else
+                {
+                    body = System.Text.Encoding.UTF8.GetString(entityBody);
+                    if (body.Length > 1000) body = body.Substring(0, 1000) + "...<truncated>";
+                }
                 var auth = request.HasHeader("Authorization")
                     ? request.GetFirstHeaderValue("Authorization")
                     : "<none>";
@@ -146,9 +153,15 @@ public class SendRequestPatch
                         Plugin.Log.LogWarning($"[HTTP] <- {url} NO RESPONSE (state={req.State})");
                     else
                     {
-                        var text = resp.DataAsText;
-                        if (string.IsNullOrEmpty(text)) text = "<empty>";
-                        else if (text.Length > 1000) text = text.Substring(0, 1000) + "...<truncated>";
+                        string text;
+                        if (IsBinaryContentType(resp.GetFirstHeaderValue("content-type")))
+                            text = "<binary>";
+                        else
+                        {
+                            text = resp.DataAsText;
+                            if (string.IsNullOrEmpty(text)) text = "<empty>";
+                            else if (text.Length > 1000) text = text.Substring(0, 1000) + "...<truncated>";
+                        }
                         Plugin.Log.LogInfo($"[HTTP] <- {resp.StatusCode} {url} body={text}");
                     }
 
@@ -159,6 +172,46 @@ public class SendRequestPatch
         {
             Plugin.Log.LogError($"[HTTP] failed to attach response logger: {e}");
         }
+    }
+
+    // Content-Type prefixes/keywords we treat as textual; anything else is logged as <binary> so we
+    // don't dump image/asset bytes into the log.
+    private static readonly string[] TextContentTypes =
+    {
+        "text/", "application/json", "application/xml", "application/javascript",
+        "application/x-www-form-urlencoded", "+json", "+xml",
+    };
+
+    // True if the body is (probably) binary and shouldn't be logged as text. Defaults to text when
+    // there's no Content-Type, so we err toward logging rather than hiding.
+    private static bool IsBinaryContentType(string contentType)
+    {
+        if (string.IsNullOrEmpty(contentType)) return false;
+
+        foreach (var t in TextContentTypes)
+            if (contentType.Contains(t, StringComparison.OrdinalIgnoreCase))
+                return false;
+        return true;
+    }
+
+    // Content sniff for raw request bytes — the Content-Type header isn't reliably set at
+    // SendRequest time (e.g. multipart form bodies set it lazily, and the body still embeds the
+    // raw image), so look at the bytes: a NUL byte, or a high ratio of non-text control bytes in
+    // the first chunk, means it's binary (or binary-mixed like a multipart upload).
+    private static bool LooksBinary(byte[] data)
+    {
+        if (data.Length == 0) return false;
+
+        var sample = Math.Min(data.Length, 4096);
+        var nonText = 0;
+        for (var i = 0; i < sample; i++)
+        {
+            var b = data[i];
+            if (b == 0) return true;
+            // Control chars other than tab/newline/carriage-return.
+            if (b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0D) nonText++;
+        }
+        return nonText * 100 / sample > 10;
     }
 
     // Base domain of the custom server: the configured host with the leading "ns." stripped.
