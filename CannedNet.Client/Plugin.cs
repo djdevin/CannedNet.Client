@@ -48,8 +48,6 @@ public class Plugin : BasePlugin
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        Log.LogInfo($"Scene loaded: {scene.name} (buildIndex={scene.buildIndex})");
-
         // CheatManager boots us out of rooms when it runs, but it's ALSO the DUID service the DI
         // container resolves for account creation / login (destroying it removes that service).
         // So instead of destroying it, *deactivate* the GameObject: it stops running (no Update /

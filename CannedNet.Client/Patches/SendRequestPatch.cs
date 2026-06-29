@@ -10,11 +10,10 @@ namespace CannedNet.Client.Patches;
  */
 public class SendRequestPatch
 {
-    // Official root domain to redirect away from. Any host under it (ns.rec.net,
-    // api.rec.net, cdn.rec.net, ...) gets its root swapped for the custom server's root.
-    private const string OfficialRoot = "rec.net";
+    // Official name server host to redirect away from, swapped for the custom server.
+    private const string OfficialNameServer = "ns.rec.net";
 
-    // Amplitude telemetry host; redirected to the custom datacollection service.
+    // Amplitude telemetry host; blocked outright (see Prefix).
     private const string AmplitudeHost = "api2.amplitude.com";
 
     // Skip when HTTP-logging so we don't spam the logs.
@@ -36,7 +35,8 @@ public class SendRequestPatch
     [HarmonyPatch(typeof(HTTPManager), "SendRequest", [typeof(HTTPRequest)])]
     public class ConnectToRecNetPatch
     {
-        private static void Prefix(ref HTTPRequest request)
+        // Returns false to skip the original SendRequest (drop the request entirely).
+        private static bool Prefix(ref HTTPRequest request, ref HTTPRequest __result)
         {
             var debug = Plugin.Debug.Value && !IsIgnoredForLogging(request.Uri.AbsoluteUri);
 
@@ -60,30 +60,21 @@ public class SendRequestPatch
             }
 
             var host = request.Uri.Host;
-            string newHost = null;
-            if (host == OfficialRoot || host.EndsWith("." + OfficialRoot))
-            {
-                // Preserve the subdomain, swap only the root: api.rec.net -> api.my.new-rec.net
-                newHost = host.Substring(0, host.Length - OfficialRoot.Length) + GetBaseDomain();
-            }
-            else if (host == AmplitudeHost)
+            if (host == AmplitudeHost)
             {
                 // Amplitude telemetry hits real Amplitude (400 invalid_api_key) and Unity errors
-                // on it; redirect to our datacollection service so the backend can swallow it.
-                newHost = "datacollection." + GetBaseDomain();
+                // on it. It's fire-and-forget, so drop it entirely: skip the original SendRequest
+                // and hand the (undispatched) request back so callers don't NRE on a null return.
+                if (debug)
+                    Plugin.Log.LogInfo($"[HTTP] blocked {request.Uri.AbsoluteUri}");
+                __result = request;
+                return false;
             }
 
-            if (newHost != null)
+            if (host == OfficialNameServer)
             {
-                var uri = request.Uri;
-                var port = uri.IsDefaultPort ? "" : $":{uri.Port}";
-                var newUrl = $"{uri.Scheme}://{newHost}{port}{uri.PathAndQuery}";
-
-                if (debug)
-                {
-                    Plugin.Log.LogInfo($"[HTTP] intercepted {host} -> {newHost}");
-                }
-                request.Uri = new Il2CppSystem.Uri(newUrl);
+                // Redirect the nameserver lookup to the custom server.
+                RewriteTo(request, Plugin.ServerHostname.Value, debug);
             }
 
             if (debug)
@@ -91,6 +82,8 @@ public class SendRequestPatch
                 LogResponseWhenDone(request);
                 CaptureSentHeaders(request);
             }
+
+            return true;
         }
     }
 
@@ -214,11 +207,17 @@ public class SendRequestPatch
         return nonText * 100 / sample > 10;
     }
 
-    // Base domain of the custom server: the configured host with the leading "ns." stripped.
-    // "https://ns.my.new-rec.net" -> "my.new-rec.net" so we can prefix the other API endpoints.
-    private static string GetBaseDomain()
+    // Rewrites the request to point at targetUrl (a full URL), keeping the original path + query.
+    private static void RewriteTo(HTTPRequest request, string targetUrl, bool debug)
     {
-        var host = new System.Uri(Plugin.ServerHostname.Value).Host;
-        return host.StartsWith("ns.") ? host.Substring(3) : host;
+        var target = new System.Uri(targetUrl);
+        var uri = request.Uri;
+        var port = target.IsDefaultPort ? "" : $":{target.Port}";
+        var newUrl = $"{target.Scheme}://{target.Host}{port}{uri.PathAndQuery}";
+
+        if (debug)
+            Plugin.Log.LogInfo($"[HTTP] intercepted {uri.Host} -> {target.Host}");
+
+        request.Uri = new Il2CppSystem.Uri(newUrl);
     }
 }
