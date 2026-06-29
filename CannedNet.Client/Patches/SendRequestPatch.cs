@@ -103,7 +103,11 @@ public class SendRequestPatch
                             text = resp.DataAsText;
                             if (string.IsNullOrEmpty(text)) text = "<empty>";
                         }
-                        Plugin.Log.LogInfo($"[HTTP] <- {resp.StatusCode} {url} body={text}");
+                        var msg = $"[HTTP] <- {resp.StatusCode} {url} body={text}";
+                        if (resp.StatusCode is >= 200 and < 300)
+                            Plugin.Log.LogInfo(msg);
+                        else
+                            Plugin.Log.LogError(msg);
                     }
 
                     original?.Invoke(req, resp);
