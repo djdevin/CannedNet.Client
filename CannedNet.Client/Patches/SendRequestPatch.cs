@@ -53,10 +53,7 @@ public class SendRequestPatch
                     body = System.Text.Encoding.UTF8.GetString(entityBody);
                     if (body.Length > 1000) body = body.Substring(0, 1000) + "...<truncated>";
                 }
-                var auth = request.HasHeader("Authorization")
-                    ? request.GetFirstHeaderValue("Authorization")
-                    : "<none>";
-                Plugin.Log.LogInfo($"[HTTP] {request.MethodType} {request.Uri.AbsoluteUri} auth={auth} body={body}");
+                Plugin.Log.LogInfo($"[HTTP] {request.MethodType} {request.Uri.AbsoluteUri} body={body}");
             }
 
             var host = request.Uri.Host;
@@ -78,54 +75,9 @@ public class SendRequestPatch
             }
 
             if (debug)
-            {
                 LogResponseWhenDone(request);
-                CaptureSentHeaders(request);
-            }
 
             return true;
-        }
-    }
-
-    // RecNet writes some headers (notably Authorization) straight to the socket via BestHTTP's
-    // OnSendingHeaders callback, bypassing the header dictionary — so EnumerateHeaders never sees
-    // them. Tee that callback: run the original into a MemoryStream, log the bytes, then replay
-    // them to the real stream so the request goes out unchanged.
-    private static void CaptureSentHeaders(HTTPRequest request)
-    {
-        try
-        {
-            var orig = request.OnSendingHeaders;
-            if (orig == null) return;
-            var url = request.Uri.AbsoluteUri;
-
-            request.OnSendingHeaders = DelegateSupport.ConvertDelegate<Il2CppSystem.Action<HTTPRequest, Il2CppSystem.IO.Stream>>(
-                (Action<HTTPRequest, Il2CppSystem.IO.Stream>)((req, realStream) =>
-                {
-                    var forwarded = false;
-                    try
-                    {
-                        var mem = new Il2CppSystem.IO.MemoryStream();
-                        orig.Invoke(req, mem);
-                        var bytes = mem.ToArray();
-                        // Uncomment if you need to see the raw headers in the logs.
-                        //Plugin.Log.LogInfo($"[HTTP] -> wire headers for {url}: {System.Text.Encoding.UTF8.GetString(bytes)}");
-                        if (bytes.Length > 0) realStream.Write(bytes, 0, bytes.Length);
-                        forwarded = true;
-                    }
-                    catch (Exception e)
-                    {
-                        Plugin.Log.LogError($"[HTTP] failed to capture wire headers: {e}");
-                    }
-
-                    // If capture failed before writing, fall back so the headers still go out.
-                    if (!forwarded)
-                        orig.Invoke(req, realStream);
-                }));
-        }
-        catch (Exception e)
-        {
-            Plugin.Log.LogError($"[HTTP] failed to attach wire-header logger: {e}");
         }
     }
 
