@@ -6,9 +6,6 @@ using Photon.Realtime;
 
 namespace CannedNet.Client.Patches;
 
-/**
-    Patch the Photon client to point it to our custom server and use the custom App IDs.
-*/
 [HarmonyPatch(typeof(GPFPFDBGCEK), "AMOHMPKKGHL")]
 public class PhotonPatches
 {

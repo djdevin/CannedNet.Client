@@ -31,7 +31,7 @@ public class Plugin : BasePlugin
     public override void Load()
     {
         Log = base.Log;
-        
+
         AppIdRT = Config.Bind("Photon", "App Id Realtime", "", "Photon Realtime App ID");
         AppIdVoice = Config.Bind("Photon", "App Id Voice", "", "Photon Voice App ID");
         AppIdChat = Config.Bind("Photon", "App Id Chat", "", "Photon Chat App ID");
@@ -42,6 +42,7 @@ public class Plugin : BasePlugin
         Debug = Config.Bind("Advanced", "Debug", false, "Show debug logs (HTTP tracing, etc. WARNING: will include sensitive information such as passwords and auth tokens in the logs, be careful when sharing them!)");
 
         Harmony.CreateAndPatchAll(typeof(Plugin).Assembly);
+
         SceneManager.sceneLoaded += (Action<Scene, LoadSceneMode>)OnSceneLoaded;
     }
 
@@ -60,7 +61,6 @@ public class Plugin : BasePlugin
         if (cheatMgr != null)
         {
             cheatMgr.SetActive(false);
-            //GameObject.Destroy(cheatMgr);
             Log.LogInfo("cheatmanager deactivated");
         }
     }
