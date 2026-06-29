@@ -49,10 +49,7 @@ public class SendRequestPatch
                 else if (IsBinaryContentType(request.GetFirstHeaderValue("content-type")) || LooksBinary(entityBody))
                     body = "<binary>";
                 else
-                {
                     body = System.Text.Encoding.UTF8.GetString(entityBody);
-                    if (body.Length > 1000) body = body.Substring(0, 1000) + "...<truncated>";
-                }
                 Plugin.Log.LogInfo($"[HTTP] {request.MethodType} {request.Uri.AbsoluteUri} body={body}");
             }
 
@@ -105,7 +102,6 @@ public class SendRequestPatch
                         {
                             text = resp.DataAsText;
                             if (string.IsNullOrEmpty(text)) text = "<empty>";
-                            else if (text.Length > 1000) text = text.Substring(0, 1000) + "...<truncated>";
                         }
                         Plugin.Log.LogInfo($"[HTTP] <- {resp.StatusCode} {url} body={text}");
                     }
