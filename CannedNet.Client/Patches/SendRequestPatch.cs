@@ -17,6 +17,9 @@ public class SendRequestPatch
     private static readonly string[] LogIgnoreSubstrings =
     {
         "/api/gamesight/event",
+        "/data/heartbeat",
+        "/identify",
+        "/httpapi",
     };
 
     private static bool IsIgnoredForLogging(string url)
