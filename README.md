@@ -108,4 +108,4 @@ Yes. That's the point.
 
 ## License
 
-[MIT](LICENSE) © djdevin
+[MIT](LICENSE)
