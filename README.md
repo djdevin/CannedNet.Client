@@ -10,7 +10,7 @@ It does this entirely client-side with [Harmony](https://harmony.pardeike.net/) 
 
 | Patch | File | Effect |
 | --- | --- | --- |
-| Name-server redirect | `Patches/SendRequestPatch.cs` | Intercepts `BestHTTP` requests and rewrites the host `ns.rec.net` → your configured server. Also provides optional HTTP request/response logging. |
+| Name-server redirect | `Patches/SendRequestPatch.cs` | Intercepts `BestHTTP` requests and rewrites the host `ns.rec.net` → your configured server. Also provides optional HTTP request/response logging for development. |
 | Photon override | `Patches/PhotonPatches.cs` | Replaces the Realtime / Voice / Chat App IDs (and optionally the Photon name server + port) with your own. |
 | EAC bypass | `Patches/EACPatches.cs` | Forces EasyAntiCheat "ready" and stubs the challenge-response so the client connects without the official anti-cheat. |
 | TLS bypass | `Patches/FuckOffTLS.cs` | Skips server-certificate validation so a custom server's cert is accepted. |
@@ -21,11 +21,25 @@ It does this entirely client-side with [Harmony](https://harmony.pardeike.net/) 
 
 - A Rec Room install set up with **BepInEx 6 (IL2CPP, bleeding-edge)**, launched at least once so the IL2CPP interop assemblies have been generated under `BepInEx/interop/`.
 - **.NET 6 SDK** to build the plugin.
-- Your own server endpoints: a RecNet name server, and Photon App IDs.
+- Your own server endpoints: a RecNet name server, and [Photon](https://www.photonengine.com) app keys.
 
-## Building
+_Looking for a custom RecNet server?_ Try https://github.com/CannedNet/CannedNet.Client
 
-The project references the game's interop DLLs, so the build needs to know where your Rec Room install lives. It is **not** hardcoded in the repo. Set `GamePath` using any one of:
+## Installing
+
+1. Download the game using https://github.com/SteamRE/DepotDownloader. The manifest ID is `7859140924515540835`.  
+Example: `depotdownloader -app 471710 -depot 471711 -manifest 7859140924515540835`
+**You must use this specific version.**
+2. Install BepInEx to the game. See https://docs.bepinex.dev/articles/user_guide/installation/index.html. **Note that you must use version 6!**
+
+### From release
+
+1. Download a release from [/releases](/releases)
+2. Drop the `.dll` file into `BepInEx/plugins/`
+
+### From source
+
+The project references the game's interop DLLs, so the build needs to know where your Rec Room install lives. Set `GamePath` using any one of:
 
 1. **A local props file** (recommended):
    ```sh
@@ -52,16 +66,15 @@ dotnet build
 
 The build validates that `GamePath` is set and that `$(GamePath)\BepInEx\interop` exists, and fails with a clear message otherwise.
 
-## Installing
-
 A post-build step (the `DeployPlugin` target in the `.csproj`) automatically copies the built `CannedNet.Client.dll` into your Rec Room install's `BepInEx/plugins/` folder after every build. Since `GamePath` already points at your install, you don't need to copy anything by hand — just `dotnet build` and launch the game.
 
 If you need the DLL elsewhere, it's also left in `bin/Debug/net6.0/`.
 
 ## Configuration
 
-On first run the plugin generates a config file at
-`BepInEx/config/lapis.cannednet.client.cfg`. Edit it (or use a BepInEx config manager) to set:
+Start the game for the first time. In `BepInEx` you should now see a `config` folder. If not, verify BepInEx installation and version.
+
+Inside `config`, edit the `lapis.cannednet.client.cfg` file and update as needed:
 
 **[Server]**
 - `RecNet NameServer Host` — base URL of your RecNet name server (default `https://ns.lapis.codes`).
@@ -75,7 +88,7 @@ On first run the plugin generates a config file at
 - `Enabled Advanced Settings` — must be `true` to apply the custom Photon name server / port below.
 - `Photon NameServer` — custom Photon name server host.
 - `Photon NameServer Port` — custom port (`0` uses the default, `4533`).
-- `Debug` — verbose HTTP request/response logging.
+- `Debug` — verbose HTTP request/response logging (only needed for development)
   > ⚠️ Debug logs include **sensitive data** (passwords, auth tokens). Be careful when sharing them.
 
 ## Project layout
@@ -87,6 +100,12 @@ On first run the plugin generates a config file at
 | `CannedNet.Client.csproj` | Build config + interop references (driven by `GamePath`), and the `DeployPlugin` post-build copy |
 | `GamePath.props.example` | Template for your local `GamePath.props` |
 
+## FAQ
+
+**Can I use this for my own Rec Room server?**
+
+Yes. That's the point.
+
 ## License
 
-[MIT](LICENSE) © Lapis
+[MIT](LICENSE) © djdevin
