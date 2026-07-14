@@ -32,7 +32,7 @@ public class SendRequestPatch
     }
 
     // Cap logged bodies so a large response/request doesn't flood the log.
-    private const int MaxLoggedBodyLength = 1000;
+    private const int MaxLoggedBodyLength = 10000;
 
     private static string Truncate(string s)
     {
