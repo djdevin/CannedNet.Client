@@ -24,7 +24,7 @@ See https://github.com/djdevin/recnet-plugin#from-source
 | TLS bypass | `Patches/DisableTLSPinning.cs` | Skips server-certificate validation so a custom server's cert is accepted. |
 | Promise stub | `Patches/PromisePatch.cs` | Allows custom global-metadata.dat files without the game crashing. |
 | CheatManager handling | `Plugin.cs` | Deactivates the in-game `CheatManager` (which would otherwise boot you from rooms) while keeping it resolvable for account creation / login. |
-| DUID mismatch workaround | `Patches/DUIDMismatchPatch.cs` | Optional. Forces the device-id mismatch check to "no mismatch" so the Create Account hang (below) is skipped. Off by default. |
+| DUID mismatch workaround | `Patches/DUIDMismatchPatch.cs` | Forces the device-id mismatch check to "no mismatch" so the Create Account hang (below) is skipped. **On by default**; no-op on healthy machines. |
 
 ## The Create Account / DUID hang
 
@@ -39,7 +39,8 @@ why the bug hits some players and not others (and is hard to reproduce if your o
 
 **The decision point** is `CheatManager.CheckForDUIDMismatch`. Forcing it to return *true* reproduces
 the hang on any machine; forcing it *false* skips the whole path. That false-forcing is the shipping
-workaround, exposed as the `Suppress DUID Mismatch` config option.
+workaround, exposed as the `Suppress DUID Mismatch` config option, which is **on by default**. It's a
+no-op on healthy machines (their real check already returns false) and skips the hang on affected ones.
 
 **Still unsolved:** we have not found where the "old" device id in that POST actually comes from. It
 survives deleting the entire `HKCU\Software\Against Gravity\Rec Room` registry key, and on the failing
@@ -126,8 +127,8 @@ Inside `config`, edit the `net.rec.plugin.cfg` file and update as needed:
 - `Photon NameServer Port` — custom port (`0` uses the default, `4533`).
 - `Debug` — verbose HTTP request/response logging (only needed for development)
   > ⚠️ Debug logs include **sensitive data** (passwords, auth tokens). Be careful when sharing them.
-- `Suppress DUID Mismatch` — set `true` to skip the Create Account / DUID hang (see above). This is the
-  only DUID option meant for normal use.
+- `Suppress DUID Mismatch` — skips the Create Account / DUID hang (see above). **On by default**; the
+  only DUID option meant for normal use. Set `false` only to observe the real mismatch for debugging.
 
 The remaining `[Advanced]` DUID options — `Simulate DUID Mismatch`, `Corrupt Stored DUID`,
 `Restore Stored DUID`, `DeviceId Response Override`, `DeviceId Response Status` — are **diagnostic

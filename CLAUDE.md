@@ -108,13 +108,14 @@ The gnarliest bug so far; the diagnostic tooling for it still lives in the repo.
 - **Proper root-cause fix:** server-side — make the endpoint stop reporting a stale `old` id (so
   `old == new`, no mismatch) or return whatever the client needs to proceed.
 
-### Diagnostic knobs (all in `[Advanced]`, all default false)
+### Diagnostic knobs (all in `[Advanced]`)
 
-These are investigation tools, not normal config. See the patch files for details.
+`Suppress DUID Mismatch` defaults **true** (it's the shipped fix). Everything else defaults **false** —
+those are investigation tools, not normal config. See the patch files for details.
 
 | Config key | Patch file | What it does |
 | --- | --- | --- |
-| `Suppress DUID Mismatch` | `DUIDMismatchPatch.cs` | **The fix.** Force `CheckForDUIDMismatch` → false. |
+| `Suppress DUID Mismatch` | `DUIDMismatchPatch.cs` | **The fix (default true).** Force `CheckForDUIDMismatch` → false. |
 | `Simulate DUID Mismatch` | `DUIDMismatchPatch.cs` | Force it → true. Reproduce the hang without a corrupt value. |
 | `Corrupt Stored DUID` | `CorruptDUIDPatch.cs` | One-shot: write a truncated id via `WriteDUIDs` (spoofing `SystemInfo.deviceUniqueIdentifier`) to create a *genuinely* corrupt stored value. |
 | `Restore Stored DUID` | `CorruptDUIDPatch.cs` | One-shot undo: `WriteDUIDs` with the real id. |
@@ -124,5 +125,6 @@ These are investigation tools, not normal config. See the patch files for detail
 `DUIDMismatchPatch` has three modes: `Simulate` → force true, `Suppress` → force false, neither →
 pass through to the real check (needed to observe a genuinely corrupt stored value).
 
-**These diagnostic patches should not ship in a release build** — strip them (or at least confirm all
-their knobs default false) before cutting a release. Only the `Suppress` behavior is a real fix.
+**The diagnostic patches should not ship in a release build** — strip them (or at least confirm their
+knobs default false: `Simulate`, `Corrupt`, `Restore`, `DeviceId Response Override`) before cutting a
+release. `Suppress DUID Mismatch` is the real fix and defaults **true**, so it stays on.
