@@ -23,6 +23,13 @@ public class Plugin : BasePlugin
     public static ConfigEntry<int> PhotonPort { get; private set; }
     public static ConfigEntry<bool> Debug { get; private set; }
     public static ConfigEntry<bool> SimulateDUIDMismatch { get; private set; }
+    public static ConfigEntry<bool> SuppressDUIDMismatch { get; private set; }
+    public static ConfigEntry<bool> CorruptStoredDUID { get; private set; }
+    public static ConfigEntry<bool> RestoreStoredDUID { get; private set; }
+    public static ConfigEntry<string> DeviceIdResponseOverride { get; private set; }
+    public static ConfigEntry<int> DeviceIdResponseStatus { get; private set; }
+
+    private static bool _corruptDone;
 
     public override void Load()
     {
@@ -36,7 +43,12 @@ public class Plugin : BasePlugin
         PhotonPort = Config.Bind("Advanced", "Photon NameServer Port", 0, "Custom Photon NameServer Port (if 0, it will be default)");
         ServerHostname = Config.Bind("Server", "RecNet NameServer Host", "https://ns.rec.net", "Host for the RecNet NameServer.");
         Debug = Config.Bind("Advanced", "Debug", false, "Show debug logs (HTTP tracing, etc. WARNING: will include sensitive information such as passwords and auth tokens in the logs, be careful when sharing them!)");
-        SimulateDUIDMismatch = Config.Bind("Advanced", "Simulate DUID Mismatch", false, "Force the device-id mismatch branch on this machine, to reproduce the Create Account hang locally. Leave false for normal play.");
+        SimulateDUIDMismatch = Config.Bind("Advanced", "Simulate DUID Mismatch", false, "Force CheckForDUIDMismatch to return TRUE (fakes the comparison only). Reproduces the hang path but does not corrupt any stored value. Leave false for normal play.");
+        SuppressDUIDMismatch = Config.Bind("Advanced", "Suppress DUID Mismatch", false, "Force CheckForDUIDMismatch to return FALSE (the workaround fix): the client never migrates and never takes the hang path. Overrides a genuinely corrupt stored value too. Set true to ship the workaround.");
+        CorruptStoredDUID = Config.Bind("Advanced", "Corrupt Stored DUID", false, "ONE-SHOT TEST: on next launch, write a truncated device id into the DUID pref via the game's own WriteDUIDs, producing a genuinely corrupt STORED value (real current id) — exactly the friend's condition. After it logs '[CORRUPT] wrote', set this back to false and relaunch to drive the real mismatch path. Use 'Restore Stored DUID' to undo.");
+        RestoreStoredDUID = Config.Bind("Advanced", "Restore Stored DUID", false, "ONE-SHOT UNDO: on next launch, call WriteDUIDs with the real device id, overwriting any corrupt stored value with a good one. Set back to false after it logs '[CORRUPT] restored'.");
+        DeviceIdResponseOverride = Config.Bind("Advanced", "DeviceId Response Override", "", "Replace the body of the PlayerReporting/v1/deviceId response with this text, to test what shape the client will accept. Empty = leave the server's response alone.");
+        DeviceIdResponseStatus = Config.Bind("Advanced", "DeviceId Response Status", 200, "HTTP status to force on the PlayerReporting/v1/deviceId response. Only applies when the override body is set.");
 
         Harmony.CreateAndPatchAll(typeof(Plugin).Assembly);
 
@@ -53,10 +65,17 @@ public class Plugin : BasePlugin
         // each freshly-spawned (active) instance on every load. (GameObject.Find only returns active
         // objects, so once deactivated it isn't found again.)
         var cheatMgr = GameObject.Find("GameRoot/(Startup)(Clone)/Core Systems/[CheatManager]");
-        if (cheatMgr != null)
-        {
-            cheatMgr.SetActive(false);
-            Log.LogInfo("cheatmanager deactivated");
-        }
+        if (cheatMgr == null)
+            return;
+
+        // One-shot corruption for testing: must run while the component is still active (before we
+        // deactivate it below), because it calls the live CheatManager.WriteDUIDs().
+        if (CorruptStoredDUID.Value && !_corruptDone)
+            _corruptDone = Patches.CorruptDUIDPatch.CorruptStored(cheatMgr);
+        else if (RestoreStoredDUID.Value && !_corruptDone)
+            _corruptDone = Patches.CorruptDUIDPatch.RestoreStored(cheatMgr);
+
+        cheatMgr.SetActive(false);
+        Log.LogInfo("cheatmanager deactivated");
     }
 }

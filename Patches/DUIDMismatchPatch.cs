@@ -2,20 +2,21 @@ using HarmonyLib;
 
 namespace RecNetPlugin.Patches;
 
-// CheatManager is Rec Room's DUID service (it implements PGECJHKNIEN, and also exposes WriteDUIDs /
-// ClearDUIDs). CheckForDUIDMismatch(out string) returns true when the machine's stored device id
-// differs from the freshly-derived one; a true result sends the client down the device-id migration
-// path, which POSTs PlayerReporting/v1/deviceId and then stalls on Create Account without ever
-// reaching the create_account OAuth call.
+// Controls CheatManager.CheckForDUIDMismatch, which returns true when the machine's stored device id
+// differs from the freshly-derived one. A true result sends the client down the migration path that
+// POSTs PlayerReporting/v1/deviceId and then stalls on Create Account.
 //
-// Patch the concrete CheatManager method, NOT PGECJHKNIEN: the interface methods are abstract, so
-// Harmony patches them without error but the game dispatches to the implementation and the patch
+// Three modes, chosen by config:
+//   Simulate = true  -> force TRUE  (fake a mismatch to reproduce the hang without a corrupt value)
+//   Suppress = true  -> force FALSE (the workaround fix: never migrate, never hang)
+//   both false       -> pass through, let the REAL check run against the actual stored value
+//                       (needed to observe a genuinely corrupt stored id, e.g. after Corrupt Stored DUID)
+//
+// Patch the concrete CheatManager method, NOT the abstract PGECJHKNIEN interface, or the prefix
 // never runs.
 [HarmonyPatch]
 public static class DUIDMismatchPatch
 {
-    // Stand-in stored id used to fake a mismatch. Any value that differs from the real derived id
-    // works; this is the truncated one seen in the field, kept so simulated logs look like real ones.
     private const string SimulatedStoredDeviceId = "491e8b9";
 
     [HarmonyPrefix]
@@ -30,9 +31,15 @@ public static class DUIDMismatchPatch
             return false;
         }
 
-        ALOMDLLNIMD = string.Empty;
-        __result = false;
-        Plugin.Log.LogInfo("[DUID] mismatch check forced to false");
-        return false;
+        if (Plugin.SuppressDUIDMismatch.Value)
+        {
+            ALOMDLLNIMD = string.Empty;
+            __result = false;
+            Plugin.Log.LogInfo("[DUID] mismatch check forced to false (suppressed)");
+            return false;
+        }
+
+        // Pass through to the real check.
+        return true;
     }
 }
