@@ -21,9 +21,35 @@ See https://github.com/djdevin/recnet-plugin#from-source
 | Name-server redirect | `Patches/SendRequestPatch.cs` | Intercepts `BestHTTP` requests and rewrites the host `ns.rec.net` → your configured server. Also provides optional HTTP request/response logging for development. |
 | Photon override | `Patches/PhotonPatches.cs` | Replaces the Realtime / Voice / Chat App IDs (and optionally the Photon name server + port) with your own. |
 | EAC bypass | `Patches/EACPatches.cs` | Forces EasyAntiCheat "ready" and stubs the challenge-response so the client connects without the official anti-cheat. |
-| TLS bypass | `Patches/FuckOffTLS.cs` | Skips server-certificate validation so a custom server's cert is accepted. |
+| TLS bypass | `Patches/DisableTLSPinning.cs` | Skips server-certificate validation so a custom server's cert is accepted. |
 | Promise stub | `Patches/PromisePatch.cs` | Allows custom global-metadata.dat files without the game crashing. |
 | CheatManager handling | `Plugin.cs` | Deactivates the in-game `CheatManager` (which would otherwise boot you from rooms) while keeping it resolvable for account creation / login. |
+| DUID mismatch workaround | `Patches/DUIDMismatchPatch.cs` | Optional. Forces the device-id mismatch check to "no mismatch" so the Create Account hang (below) is skipped. Off by default. |
+
+## The Create Account / DUID hang
+
+Some machines hang forever on **Create Account**. This turned out to be a genuinely nasty one, so it's
+worth documenting.
+
+**What happens:** when the client's *stored* device id (DUID) differs from the one derived at runtime,
+the client takes a "migration" path — it POSTs to `PlayerReporting/v1/deviceId`, the server answers
+`200 {"success":true}`, and then the client **stalls**: it never makes the `create_account` OAuth call
+and never persists the new id. Machines whose stored id already matches never take this path, which is
+why the bug hits some players and not others (and is hard to reproduce if your own machine is fine).
+
+**The decision point** is `CheatManager.CheckForDUIDMismatch`. Forcing it to return *true* reproduces
+the hang on any machine; forcing it *false* skips the whole path. That false-forcing is the shipping
+workaround, exposed as the `Suppress DUID Mismatch` config option.
+
+**Still unsolved:** we have not found where the "old" device id in that POST actually comes from. It
+survives deleting the entire `HKCU\Software\Against Gravity\Rec Room` registry key, and on the failing
+run the local `cm_did_ppk` PlayerPref is never even read — so clearing local storage does **not** fix
+it. The leading theory is that it's held server-side (recorded by the server from earlier reports)
+and/or cached in memory from a server response, which would make the proper fix server-side. See
+`CLAUDE.md` for the full investigation and the diagnostic tooling.
+
+> ⚠️ `Suppress DUID Mismatch` is a workaround: it lets account creation through but does **not** repair
+> a genuinely corrupt stored/served id — it just stops the client from acting on the mismatch.
 
 ## Requirements
 
@@ -76,7 +102,7 @@ dotnet build
 
 The build validates that `GamePath` is set and that `$(GamePath)\BepInEx\interop` exists, and fails with a clear message otherwise.
 
-A post-build step (the `DeployPlugin` target in the `.csproj`) automatically copies the built `RecNetPatcher.dll` into your Rec Room install's `BepInEx/plugins/` folder after every build. Since `GamePath` already points at your install, you don't need to copy anything by hand — just `dotnet build` and launch the game.
+A post-build step (the `DeployPlugin` target in the `.csproj`) automatically copies the built `RecNetPlugin.dll` into your Rec Room install's `BepInEx/plugins/` folder after every build. (The copy will fail if Rec Room is running, since the DLL is locked — close the game and rebuild.) Since `GamePath` already points at your install, you don't need to copy anything by hand — just `dotnet build` and launch the game.
 
 If you need the DLL elsewhere, it's also left in `bin/Debug/net6.0/`.
 
@@ -100,13 +126,21 @@ Inside `config`, edit the `net.rec.plugin.cfg` file and update as needed:
 - `Photon NameServer Port` — custom port (`0` uses the default, `4533`).
 - `Debug` — verbose HTTP request/response logging (only needed for development)
   > ⚠️ Debug logs include **sensitive data** (passwords, auth tokens). Be careful when sharing them.
+- `Suppress DUID Mismatch` — set `true` to skip the Create Account / DUID hang (see above). This is the
+  only DUID option meant for normal use.
+
+The remaining `[Advanced]` DUID options — `Simulate DUID Mismatch`, `Corrupt Stored DUID`,
+`Restore Stored DUID`, `DeviceId Response Override`, `DeviceId Response Status` — are **diagnostic
+tools** used to investigate the hang. Leave them at their defaults unless you're debugging it; see
+`CLAUDE.md` for what each one does.
 
 ## Project layout
 
 | Path | Purpose |
 | --- | --- |
 | `Plugin.cs` | Plugin entry point, config bindings, Harmony bootstrap |
-| `Patches/` | Harmony patches (HTTP, EAC, TLS, Photon) |
+| `Patches/` | Harmony patches (HTTP, EAC, TLS, Photon, DUID) |
+| `CLAUDE.md` | Developer notes: build gotchas, IL2CPP/interop caveats, and the full DUID-hang investigation |
 | `RecNetPlugin.csproj` | Build config + interop references (driven by `GamePath`), and the `DeployPlugin` post-build copy |
 | `GamePath.props.example` | Template for your local `GamePath.props` |
 
