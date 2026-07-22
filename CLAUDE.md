@@ -42,11 +42,75 @@ dotnet build -c Debug -p:GamePath="C:\Games\depots\471711\23191908"
    patch.
 
 4. **Obfuscated members live in the global namespace** and are referenced unqualified in this codebase
-   (e.g. `typeof(JAPJPGNBMNM)`, `PGECJHKNIEN`). No `using` needed.
+   (e.g. `typeof(LEALBOODIEE)`, `PGECJHKNIEN`). No `using` needed.
 
 5. **Harmony prefix conventions here:** force a value + `return false` to skip the original (see
-   `Patches/EACPatches.cs`). For out-params, take a `ref` parameter named exactly as the interop shows
-   it (e.g. `ref string ALOMDLLNIMD`), plus `ref bool __result`.
+   `Patches/EACPatches.cs`). **Bind parameters positionally (`__0`, `__1`, …), never by their
+   obfuscated name** — obfuscated *parameter* names change per build just like type names, and binding
+   by name fails at load with `Parameter "XXX" not found in method ...`. For out-params take
+   `ref string __0` plus `ref bool __result`.
+
+6. **Method names in `[HarmonyPatch]` are strings — the compiler does not check them.** A renamed
+   *type* is a build error; a renamed *method* builds fine and only shows up as a HarmonyX error in
+   `LogOutput.log` at load, or (worse) as a patch that silently never runs. After a game upgrade,
+   re-verify every string method name with Cecil, don't just trust a green build.
+
+### Surviving a game-version upgrade
+
+Obfuscated names are re-rolled every build. Unobfuscated names (`CheckForDUIDMismatch`, `WriteDUIDs`,
+`ClearDUIDs`, `SendRequest`, `NotifyServerCertificate`, `GenerateChallengeResponse`) have been stable
+across upgrades so far; everything else must be re-resolved. Don't guess from the old name — **search
+the new interop by signature**, which is what actually identifies the target:
+
+| Patch | Target | Signature that identifies it |
+| --- | --- | --- |
+| `PhotonPatches` | `LEALBOODIEE.GBNKOFMAJPA` | only instance, 0-param method returning `Photon.Realtime.AppSettings` in `Assembly-CSharp` (`PUNNetworkManager.OIMACPCFIKN` also returns it but is static/2-param) |
+| `EACPatches` (is-ready) | `EACManager.IMMGELPFGCK` | only static, 0-param `bool` on `EACManager` that isn't a property getter; type lives in `RecRoom.Rranticheat.Runtime.dll` |
+
+Renames observed in the **07-21 build** (`C:\Games\recflare-client`), for reference:
+
+- `CheckForDUIDMismatch` out-param `ALOMDLLNIMD` → `LICOPEEMHHG` (now bound as `__0`)
+- `GenerateChallengeResponse` param `PGCINMIEBJP` → `__0`
+- `GPFPFDBGCEK.AMOHMPKKGHL` → `LEALBOODIEE.GBNKOFMAJPA`
+- `EACManager.FJLMLEPOKGE` → `EACManager.IMMGELPFGCK`
+- `JAPJPGNBMNM`, `HPHDJAFFHCN<>`, `HAAHJPGNIMD` — **gone** from `Assembly-CSharp`. These were the
+  image-signing `PromisePatch`, now deleted and replaced by `ImageSigningPatch` (see below), which
+  hooks framework types instead and so has no obfuscated names left to break.
+
+## Image signature verification
+
+The client verifies images against an RSA public key whose modulus is a string literal in
+`global-metadata.dat`. Patching that literal is fragile; **don't**. Hook the framework instead.
+
+The decisive observation: the literal base64-decodes to **exactly 256 bytes and does not start with
+`0x30`**, so it is a *raw* 2048-bit modulus, not a DER/SPKI blob. The client therefore cannot hand it
+to a key-import API — it has to base64-decode it and hand-build `RSAParameters { Modulus, Exponent }`.
+Those are plain `mscorlib` calls with unobfuscated names. Confirmed working at runtime: images load
+with no signing check.
+
+`Patches/ImageSigningPatch.cs` hooks, all in `Il2Cppmscorlib.dll`:
+
+| Hook | Purpose |
+| --- | --- |
+| `Convert.FromBase64String` | catches the literal regardless of which crypto stack consumes it (guarded by a length check first — it runs for every base64 decode in the game) |
+| `RSACryptoServiceProvider.ImportParameters` | swaps the modulus in place (both keys are 2048-bit, so no realloc) |
+| `RSACryptoServiceProvider.VerifyData` / `VerifyHash` ×2 | forces the verify to succeed |
+
+Config lives in `[Signing]`. `Disable Signature Verification` defaults **true** — that's the shipped
+behaviour, since this setup doesn't use image signing. `Signing Modulus Override` is the secondary
+path for a deployment that *does* want signed images (keeps real verification, against your keypair).
+
+Two things to remember:
+
+- **Blast radius:** forcing verify-true affects *all* mscorlib RSA verification, not just images.
+  BestHTTP's TLS uses its own bundled BouncyCastle, so cert validation appears unaffected — inferred
+  from assembly layout, not proven. Keep it behind the config knob.
+- **If it ever stops working:** the patch logs `[SIG] stock modulus seen at <hook>` on first sighting.
+  No such line = verification moved to `BestHTTP.SecureProtocol.Org.BouncyCastle`; the equivalent
+  hooks there are `RsaKeyParameters..ctor(bool, BigInteger, BigInteger)` and the **concrete**
+  `RsaDigestSigner`/`PssSigner.VerifySignature` (not the abstract `ISigner` — gotcha 3).
+- The stock modulus is hardcoded in the patch. If a future build re-rolls the key, the match silently
+  stops firing; that log line is how you'd notice.
 
 ## Inspecting the game
 
@@ -55,12 +119,18 @@ names, which assembly a concrete impl lives in). Mark-of-the-web will block load
 directly — copy it somewhere local, `Unblock-File`, then load via bytes:
 
 ```powershell
+$interop = "$env:GamePath\BepInEx\interop"
 $dst = "$scratch\Mono.Cecil.dll"
-Copy-Item "$interop\Mono.Cecil.dll" $dst; Unblock-File $dst
+# NOTE: Mono.Cecil.dll ships in BepInEx/core, NOT in BepInEx/interop.
+Copy-Item "$env:GamePath\BepInEx\core\Mono.Cecil.dll" $dst; Unblock-File $dst
 [System.Reflection.Assembly]::Load([System.IO.File]::ReadAllBytes($dst)) | Out-Null
 $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly("$interop\Assembly-CSharp.dll")
 # then walk $asm.MainModule.GetTypes(), inspect .Methods / .Fields / .IsAbstract / .IsStatic ...
 ```
+
+Not every target is in `Assembly-CSharp` — `EACManager` is in `RecRoom.Rranticheat.Runtime.dll`,
+`HTTPManager`/`LegacyTlsAuthentication` in `RecNet.Runtime.dll`. When a lookup comes up empty, sweep
+all ~305 DLLs in `interop/` (`ReadAssembly` each, `.Dispose()` after) before concluding it's gone.
 
 Notes:
 - Windows PowerShell 5.1 has **no** `?.` null-conditional operator — use explicit `$x -eq $null` checks.

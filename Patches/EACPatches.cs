@@ -9,7 +9,10 @@ namespace RecNetPlugin.Patches;
 public static class EACPatches
 {
     [HarmonyPrefix]
-    [HarmonyPatch(typeof(EACManager), "FJLMLEPOKGE")]
+    // The "is ready" check: the only static, 0-param bool method on EACManager that isn't a property
+    // getter. 07-21 build: IMMGELPFGCK (was FJLMLEPOKGE). Method names here are strings, so a rename
+    // is not a compile error — it shows up as a HarmonyX "method not found" at load.
+    [HarmonyPatch(typeof(EACManager), "IMMGELPFGCK")]
     private static bool IsReadyPatch(ref bool __result)
     {
         __result = true;
@@ -18,10 +21,11 @@ public static class EACPatches
 
     [HarmonyPrefix]
     [HarmonyPatch(typeof(EACManager), "GenerateChallengeResponse")]
-    private static bool GenerateChallengeResponsePatch(string PGCINMIEBJP, ref string __result)
+    // __0 = the challenge string (positional); obfuscated param names shift between game builds.
+    private static bool GenerateChallengeResponsePatch(string __0, ref string __result)
     {
-        if (!string.IsNullOrEmpty(PGCINMIEBJP))
-            __result = Convert.ToBase64String(Encoding.UTF8.GetBytes(PGCINMIEBJP));
+        if (!string.IsNullOrEmpty(__0))
+            __result = Convert.ToBase64String(Encoding.UTF8.GetBytes(__0));
         else
             __result = Convert.ToBase64String(Encoding.UTF8.GetBytes("nothing"));
         return false;

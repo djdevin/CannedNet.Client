@@ -21,11 +21,13 @@ public static class DUIDMismatchPatch
 
     [HarmonyPrefix]
     [HarmonyPatch(typeof(CheatManager), "CheckForDUIDMismatch")]
-    private static bool Prefix(ref string ALOMDLLNIMD, ref bool __result)
+    // __0 = the out-param (positional). Its obfuscated name changes every game build, so binding it
+    // by name throws "Parameter ... not found" on upgrade.
+    private static bool Prefix(ref string __0, ref bool __result)
     {
         if (Plugin.SimulateDUIDMismatch.Value)
         {
-            ALOMDLLNIMD = SimulatedStoredDeviceId;
+            __0 = SimulatedStoredDeviceId;
             __result = true;
             Plugin.Log.LogWarning($"[DUID] simulating mismatch, stored id = {SimulatedStoredDeviceId}");
             return false;
@@ -33,7 +35,7 @@ public static class DUIDMismatchPatch
 
         if (Plugin.SuppressDUIDMismatch.Value)
         {
-            ALOMDLLNIMD = string.Empty;
+            __0 = string.Empty;
             __result = false;
             Plugin.Log.LogInfo("[DUID] mismatch check forced to false (suppressed)");
             return false;
