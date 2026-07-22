@@ -64,8 +64,21 @@ the new interop by signature**, which is what actually identifies the target:
 
 | Patch | Target | Signature that identifies it |
 | --- | --- | --- |
-| `PhotonPatches` | `LEALBOODIEE.GBNKOFMAJPA` | only instance, 0-param method returning `Photon.Realtime.AppSettings` in `Assembly-CSharp` (`PUNNetworkManager.OIMACPCFIKN` also returns it but is static/2-param) |
-| `EACPatches` (is-ready) | `EACManager.IMMGELPFGCK` | only static, 0-param `bool` on `EACManager` that isn't a property getter; type lives in `RecRoom.Rranticheat.Runtime.dll` |
+| `PhotonPatches` | `HPEENKELKDJ.MGKINLFMJLB` | only instance, 0-param method returning `Photon.Realtime.AppSettings` in `Assembly-CSharp` (the static/2-param `PUNNetworkManager` sibling also returns it — exclude it) |
+| `EACPatches` (is-ready) | `EACManager.MCFIOBHCFBB` | only static, 0-param `bool` on `EACManager` that isn't a property getter; type lives in `RecRoom.Rranticheat.Runtime.dll` |
+
+> **Il2CppInterop regenerates on launch and obfuscation can differ between generations.** Only scan the
+> interop the game *actually loaded* — check that its mtime is *after* the last game launch, and treat a
+> clean HarmonyX load (no "Could not find method") as the real proof. A stale/mismatched interop
+> generation once produced a whole different name set (`IHODDIDPEOD.JEGOHKJDPFH`, `EACManager.KOIFGPGJGKB`)
+> that got overwritten on the next launch back to the names below — patching against it failed at load.
+
+Renames observed in the **20230414 build** (`C:\Games\recflare-client`, Steam manifest
+`3668280474894052876`):
+
+- `LEALBOODIEE.GBNKOFMAJPA` → `HPEENKELKDJ.MGKINLFMJLB`
+- `EACManager.IMMGELPFGCK` → `EACManager.MCFIOBHCFBB`
+- `CheckForDUIDMismatch` out-param → `BPOGCIINKBB` (still bound as `__0`, no source change)
 
 Renames observed in the **07-21 build** (`C:\Games\recflare-client`), for reference:
 

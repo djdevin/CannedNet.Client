@@ -10,9 +10,9 @@ public static class EACPatches
 {
     [HarmonyPrefix]
     // The "is ready" check: the only static, 0-param bool method on EACManager that isn't a property
-    // getter. 07-21 build: IMMGELPFGCK (was FJLMLEPOKGE). Method names here are strings, so a rename
-    // is not a compile error — it shows up as a HarmonyX "method not found" at load.
-    [HarmonyPatch(typeof(EACManager), "IMMGELPFGCK")]
+    // getter. 20230414 build: MCFIOBHCFBB (was IMMGELPFGCK, was FJLMLEPOKGE). Method names here are
+    // strings, so a rename is not a compile error — it shows up as a HarmonyX "method not found" at load.
+    [HarmonyPatch(typeof(EACManager), "MCFIOBHCFBB")]
     private static bool IsReadyPatch(ref bool __result)
     {
         __result = true;
