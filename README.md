@@ -1,175 +1,142 @@
-# RecNet Plugin
+# RR Redirector (native)
 
-A [BepInEx 6](https://github.com/BepInEx/BepInEx) (IL2CPP) plugin that points the Rec Room client at a self-hosted / private server.
+A native (C/Win32) DLL that points the Rec Room client at a self-hosted server, **without any
+managed mod loader**. BepInEx 6 and MelonLoader both fail on current Rec Room builds (crash in
+`il2cpp_init` / loader trips the anti-cheat memory-integrity scan). This build sidesteps that: it is
+loaded as a `version.dll` proxy and applies its patches — Winsock DNS, the HTTP request URL, TLS
+pinning, the memory-integrity scan and EAC — directly in native code.
 
-It does this entirely client-side with [Harmony](https://harmony.pardeike.net/) patches — no game files are modified on disk. The plugin rewrites the RecNet name-server lookups, swaps in your own Photon credentials, and disables the client-side guards (EasyAntiCheat, TLS certificate pinning, image signature verification) that would otherwise reject a non-official server.
+## How it works
 
-> ⚠️ This disables anti-cheat, certificate validation, and RSA signature verification on the client. Use at your own risk.
+1. **Loading vector.** `RecRoom.exe`/`UnityPlayer.dll` import `VERSION.dll` by name, and the loader
+   searches the game folder before `System32`. We ship our own `version.dll` there; each of its 17
+   exports is a thin wrapper that lazily loads the real system `version.dll` (by full path, so no
+   recursion) and calls through, so the game keeps working. Its `DllMain` starts the hook thread.
+   Loads very early, before `UnityPlayer.dll`. Self-contained — nothing else to ship.
 
-## Projects
+   `RecRoom.exe` spawns `UnityCrashHandler64.exe` from the same folder, so our DLL loads there too.
+   The hook thread checks the host executable and exits immediately in anything but `RecRoom.exe` —
+   otherwise every launch opened a second debug console and left a stray process waiting on Unity.
 
-[<img width="100" height="100" alt="image" src="https://github.com/user-attachments/assets/f0b91aa3-49f5-4077-8eb9-5ae676888709" />](https://www.recflare.net)
+2. **DNS host rewrite** (`src/hooks/dns_hook.c`). Detours `ws2_32!getaddrinfo`. A lookup for an exact
+   `from` host in `redirector.json` (e.g. `ns.rec.net`) is resolved as its `to` host
+   (`ns.recflare.net`) instead — we hand the rewritten name to real DNS, so the client reaches the
+   target's *current* IP (survives dynamic IPs) rather than a pinned address. Surgical: only the
+   configured hosts are affected. Necessary but **not sufficient** on its own — it changes only name
+   resolution, leaving SNI and the `Host:` header saying `ns.rec.net`. Kept as a safety net under (3).
 
-This plugin powers [RecFlare](https://www.recflare.net) - an open source, cloud-native Rec Room server.
+3. **HTTP host rewrite** (`src/unity/http_rewrite.c`) — the patch that actually moves traffic. Hooks
+   the concrete static `BestHTTP.HTTPManager.SendRequest(HTTPRequest)`, reads
+   `req.Uri.AbsoluteUri`, swaps the host through the same `redirector.json` pairs, and assigns a
+   fresh `new Uri(...)` back before letting the real `SendRequest` run. The new host therefore
+   carries end-to-end — URL, SNI and `Host:` — so the target can serve it as its own vhost with its
+   own cert. Native equivalent of the managed build's `SendRequestPatch`. This is the one
+   **call-through** hook, so it depends on the relocating trampoline in `src/memory/detour.c`.
 
-## Safety
+4. **TLS pinning bypass** (`src/unity/ssl_patch.c`). Redirecting HTTPS means the handshake presents a
+   cert the client would reject. Resolves the **concrete**
+   `Org.BouncyCastle.Crypto.Tls.LegacyTlsAuthentication.NotifyServerCertificate` and detours its
+   compiled body to a no-op that accepts unconditionally — the native equivalent of the managed
+   build's `DisableTLSPinning` Harmony patch.
 
-Using BepInEx plugins may cause anti-virus scanners or Windows Defender to pick it up as a threat.
+5. **Memory-integrity scan neutralizer** (`src/unity/memcheck_patch.c`). The client runs a background
+   scan that hashes `GameAssembly.dll` code against baked-in hashes; the inline hooks above change
+   that memory, so boot dies with *"Launch validation failed."* The scanner's name is obfuscated and
+   rotates every build, so it is found **by signature** instead: the class in `Assembly-CSharp` that
+   holds both a `Thread` and a `CancellationTokenSource` field. Its public instance 0-param non-void
+   method is the scan entry point; we detour it to return an already-resolved promise (fetched from
+   the promise type's static `Resolved` getter), so boot's await satisfies instantly. Started first
+   among the il2cpp patches — the boot step that awaits the scan can fire early, and the reflection
+   sweep needs a head start.
 
-If you don't trust the compiled .DLL, you can build it yourself.
+6. **EAC neutralizer** (`src/unity/eac_patch.c`). Two replace-only hooks on
+   `RecRoom.AntiCheat.EACManager`: the readiness check (the sole static 0-param `bool`
+   non-property-getter method — again resolved by signature, since the name rotates) is forced to
+   `true`, because the real check needs EasyAntiCheat services that no longer exist; and
+   `GenerateChallengeResponse(string)` (unobfuscated) returns `base64(challenge)`, with
+   `base64("nothing")` for an empty/null challenge. Safe to patch only because (5) has already
+   neutralized the hash check.
 
-See https://github.com/djdevin/recnet-plugin#from-source
+Everything from (2) on runs off one background thread spawned in `DllMain`; each il2cpp patch gets
+its own thread, since they must wait on the runtime independently. `src/unity/module_watch.c` just
+logs `GameAssembly.dll` / `UnityPlayer.dll` as they appear and then stops.
 
-## What it does
+The `connect` and `gethostbyname` hooks are present but **intentionally not installed**: the
+`connect` hook redirects *all* :443 traffic (would break Photon/CDN/telemetry), and `getaddrinfo`
+already covers the il2cpp DNS path.
 
-| Patch | File | Effect |
-| --- | --- | --- |
-| Name-server redirect | `Patches/SendRequestPatch.cs` | Intercepts `BestHTTP` requests and rewrites the host `ns.rec.net` → your configured server. Also provides optional HTTP request/response logging for development. |
-| Photon override | `Patches/PhotonPatches.cs` | Replaces the Realtime / Voice / Chat App IDs (and optionally the Photon name server + port) with your own. |
-| EAC bypass | `Patches/EACPatches.cs` | Forces EasyAntiCheat "ready" and stubs the challenge-response so the client connects without the official anti-cheat. |
-| TLS bypass | `Patches/DisableTLSPinning.cs` | Skips server-certificate validation so a custom server's cert is accepted. |
-| Image signing bypass | `Patches/ImageSigningPatch.cs` | Forces the mscorlib RSA verify to succeed, so images your server serves load without being signed by Rec Room's key. **On by default.** |
-| CheatManager handling | `Plugin.cs` | Deactivates the in-game `CheatManager` (which would otherwise boot you from rooms) while keeping it resolvable for account creation / login. |
-| DUID mismatch workaround | `Patches/DUIDMismatchPatch.cs` | Forces the device-id mismatch check to "no mismatch" so the Create Account hang (below) is skipped. **On by default**; no-op on healthy machines. |
-| DUID diagnostics | `Patches/DUIDProbePatch.cs`, `Patches/CorruptDUIDPatch.cs`, `Patches/DeviceIdResponsePatch.cs` | Investigation tooling for the hang: PlayerPrefs/DUID call logging, deliberately corrupting or restoring the stored id, and rewriting the `deviceId` response in flight. All off by default — see [Configuration](#configuration). |
+### Resolving obfuscated targets
 
-## The Create Account / DUID hang
+Rec Room obfuscates its own type/method names and they rotate every build, so nothing here
+hard-codes one. Framework names (`SendRequest`, `get_Uri`, `NotifyServerCertificate`,
+`GenerateChallengeResponse`, `EACManager`) are stable and resolved literally; the anti-cheat internals
+are resolved by **shape** — field types, method signature, return type — through the il2cpp
+reflection API at runtime. Every candidate is logged, and an ambiguous match logs a `WARNING` rather
+than silently guessing.
 
-Some machines hang forever on **Create Account**. This turned out to be a genuinely nasty one, so it's
-worth documenting.
+## Build
 
-**What happens:** when the client's *stored* device id (DUID) differs from the one derived at runtime,
-the client takes a "migration" path — it POSTs to `PlayerReporting/v1/deviceId`, the server answers
-`200 {"success":true}`, and then the client **stalls**: it never makes the `create_account` OAuth call
-and never persists the new id. Machines whose stored id already matches never take this path, which is
-why the bug hits some players and not others (and is hard to reproduce if your own machine is fine).
+Requires VS 2022 (C toolchain) + CMake + Ninja (both ship with VS). **Must build x64** — a 32-bit
+DLL silently fails to load. Import the amd64 VC environment first:
 
-**The decision point** is `CheatManager.CheckForDUIDMismatch`. Forcing it to return *true* reproduces
-the hang on any machine; forcing it *false* skips the whole path. That false-forcing is the shipping
-workaround, exposed as the `Suppress DUID Mismatch` config option, which is **on by default**. It's a
-no-op on healthy machines (their real check already returns false) and skips the hang on affected ones.
-
-**Still unsolved:** we have not found where the "old" device id in that POST actually comes from. It
-survives deleting the entire `HKCU\Software\Against Gravity\Rec Room` registry key, and on the failing
-run the local `cm_did_ppk` PlayerPref is never even read — so clearing local storage does **not** fix
-it. The leading theory is that it's held server-side (recorded by the server from earlier reports)
-and/or cached in memory from a server response, which would make the proper fix server-side. See
-`CLAUDE.md` for the full investigation and the diagnostic tooling.
-
-> ⚠️ `Suppress DUID Mismatch` is a workaround: it lets account creation through but does **not** repair
-> a genuinely corrupt stored/served id — it just stops the client from acting on the mismatch.
-
-## Requirements
-
-- A Rec Room install set up with **BepInEx 6 (IL2CPP, bleeding-edge)**, launched at least once so the IL2CPP interop assemblies have been generated under `BepInEx/interop/`.
-- **.NET 6 SDK** to build the plugin.
-- Your own server endpoints: a RecNet name server, and [Photon](https://www.photonengine.com) app keys.
-
-_Looking for a custom RecNet server?_ Try https://github.com/djdevin/recflare
-
-## Installing
-
-1. Download the game using https://github.com/SteamRE/DepotDownloader. The manifest ID is `6426603215211043630` (the **20230414** build).
-   Example: `depotdownloader -app 471710 -depot 471711 -manifest 6426603215211043630`
-   **You must use this specific version.** Rec Room's type and method names are obfuscated and
-   re-rolled every build, so the patches only bind against the build they were written for.
-2. Install BepInEx to the game. See https://docs.bepinex.dev/articles/user_guide/installation/index.html. **Note that you must use version 6!**
-3. Launch the game once so BepInEx generates its `config/` folder and the IL2CPP interop assemblies.
-
-Alternatively, use the [RecFlare client](https://github.com/djdevin/recflare-client)
-
-### From release
-
-1. Download a release from [Releases](https://github.com/djdevin/recnet-plugin/releases)
-2. Drop the `.dll` file into `BepInEx/plugins/`
-
-### From source
-
-The project references the game's interop DLLs, so the build needs to know where your Rec Room install lives. Set `GamePath` using any one of:
-
-1. **A local props file** (recommended):
-   ```sh
-   cp GamePath.props.example GamePath.props
-   ```
-   then edit `GamePath` in `GamePath.props` to point at your Rec Room install root. This file is local-only and stays out of the repo.
-
-2. **An environment variable:**
-   ```sh
-   set RECROOM_PATH=C:\Path\To\RecRoom        # cmd
-   $env:RECROOM_PATH = "C:\Path\To\RecRoom"   # PowerShell
-   ```
-
-3. **On the command line:**
-   ```sh
-   dotnet build -p:GamePath="C:\Path\To\RecRoom"
-   ```
-
-Then build:
-
-```sh
-dotnet build
+```powershell
+& "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" amd64
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
-The build validates that `GamePath` is set and that `$(GamePath)\BepInEx\interop` exists, and fails with a clear message otherwise.
+Output: `build\version.dll` — a single self-contained proxy (it loads the real system `version.dll`
+at runtime, so there is nothing else to ship).
 
-A post-build step (the `DeployPlugin` target in the `.csproj`) automatically copies the built `RecNetPlugin.dll` into your Rec Room install's `BepInEx/plugins/` folder after every build. (The copy will fail if Rec Room is running, since the DLL is locked — close the game and rebuild.) Since `GamePath` already points at your install, you don't need to copy anything by hand — just `dotnet build` and launch the game.
+One-step deploy into the game folder (close Rec Room first — the DLL is locked while it runs):
 
-If you need the DLL elsewhere, it's also left in `bin/Debug/net6.0/`.
+```powershell
+cmake -S . -B build -G Ninja -DGAME_DIR="C:\Games\recflare-client-unstable"
+cmake --build build
+```
 
-## Configuration
+## Install (manual)
 
-Start the game for the first time. In `BepInEx` you should now see a `config` folder. If not, verify BepInEx installation and version.
+1. Copy `build\version.dll` into the Rec Room install root (next to `RecRoom.exe`). If BepInEx's
+   `version.dll` is there, replace it (this build does not use BepInEx).
+2. Copy `redirector.json.example` to `redirector.json` there and set the `rewrite` pairs
+   (`{ "from": "ns.rec.net", "to": "ns.recflare.net" }`). The same pairs drive both the DNS and the
+   HTTP rewrite. Matching is exact — add one entry per host. Parsed by a flat key scan, not a real
+   JSON parser, so keep it flat: one object per rewrite.
+3. Launch. A console window opens; logs also go to `redirector_<pid>.log` beside `RecRoom.exe`.
 
-Inside `config`, edit the `net.rec.plugin.cfg` file and update as needed:
+A healthy run logs all of these (each patch runs on its own thread, so they interleave; `[MEMCHECK]`
+lands last — its reflection sweep takes a moment):
 
-**[Server]**
-- `RecNet NameServer Host` — base URL of your RecNet name server (like `https://ns.rec.net`).
+```
+[STATUS] DNS REDIRECT ACTIVE
+[SSL]     TLS pinning bypassed (NotifyServerCertificate -> accept-all)
+[EAC]     readiness check forced true
+[EAC]     GenerateChallengeResponse -> base64(challenge)
+[HTTP]    host rewrite installed on SendRequest
+[MEMCHECK] native memory integrity scan skipped (scan-start -> resolved promise)
+[HTTP]    https://ns.rec.net/ -> https://ns.recflare.net/          (one per request)
+```
 
-**[Photon]**
-- `App Id Realtime` — Photon Realtime App ID.
-- `App Id Voice` — Photon Voice App ID.
-- `App Id Chat` — Photon Chat App ID.
+The per-request `[HTTP] ... -> ...` lines are the proof traffic is actually moving; everything above
+them only says the hooks installed. `[DETOUR] ... refusing hook` means the detour engine wouldn't
+touch that prologue (see below) and that patch is **not** active.
 
-**[Signing]**
-- `Disable Signature Verification` — stops the client checking that images are signed with Rec Room's
-  private key, so your own server can serve images. **On by default**; leave it alone.
-  > ⚠️ This forces **all** mscorlib RSA verification to pass, not just image signatures. TLS is
-  > unaffected (BestHTTP uses its own bundled BouncyCastle).
+## Known limitations / open items
 
-**[Advanced]**
-- `Enabled Advanced Settings` — must be `true` to apply the custom Photon name server / port below.
-- `Photon NameServer` — custom Photon name server host.
-- `Photon NameServer Port` — custom port (`0` uses the default, `4533`).
-- `Debug` — verbose HTTP request/response logging (only needed for development)
-  > ⚠️ Debug logs include **sensitive data** (passwords, auth tokens). Be careful when sharing them.
-- `Suppress DUID Mismatch` — skips the Create Account / DUID hang (see above). **On by default**; the
-  only DUID option meant for normal use. Set `false` only to observe the real mismatch for debugging.
-
-The remaining `[Advanced]` DUID options — `Simulate DUID Mismatch`, `Corrupt Stored DUID`,
-`Restore Stored DUID`, `DeviceId Response Override`, `DeviceId Response Status` — are **diagnostic
-tools** used to investigate the hang. Leave them at their defaults unless you're debugging it; see
-`CLAUDE.md` for what each one does.
-
-## Project layout
-
-| Path | Purpose |
-| --- | --- |
-| `Plugin.cs` | Plugin entry point, config bindings, Harmony bootstrap |
-| `Patches/` | Harmony patches (HTTP, EAC, TLS, Photon, image signing, DUID) |
-| `CLAUDE.md` | Developer notes: build gotchas, IL2CPP/interop caveats, and the full DUID-hang investigation |
-| `RecNetPlugin.csproj` | Build config + interop references (driven by `GamePath`), and the `DeployPlugin` post-build copy |
-| `GamePath.props.example` | Template for your local `GamePath.props` |
-
-## FAQ
-
-**Can I use this for my own Rec Room server?**
-
-Yes. That's the point.
-
-## Credits
-
-Based on https://github.com/CannedNet/CannedNet.Client
-
-## License
-
-[MIT](LICENSE)
+- **Obfuscated targets are matched by shape, not name.** A Rec Room build that changes the *structure*
+  of the scanner class or the EAC readiness method — not just its name — will break that patch. The
+  logs list every candidate considered, and warn when more than one matched, so a drift shows up as a
+  `WARNING` or a "not identified" line rather than a silent misfire. Watch for `[MEMCHECK] scanner
+  candidate` lines: more than one means the field-signature match is no longer unique.
+- **The detour engine's length decoder is minimal.** It relocates rip-relative `disp32` and `rel32`
+  branches into a trampoline allocated within ±2 GB, but bails on two-byte (`0F`) opcodes, `rel8`
+  branches, and anything it doesn't model — and `InstallDetour` then **refuses the hook** rather than
+  corrupt code. This only constrains call-through hooks (currently just `SendRequest`); replace-only
+  hooks take a blind 14-byte overwrite, which is safe because they jump away and never execute the
+  torn tail.
+- **Nothing is undone on unload.** The detours stay installed for the life of the process; the saved
+  original bytes are kept but never restored.
+- **The anti-cheat may catch up.** The memory-integrity scan is neutralized at its managed entry
+  point, not at the native scanner itself — a build that calls the scan from somewhere else, or adds a
+  second check, would reject the client again.

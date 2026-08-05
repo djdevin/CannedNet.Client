@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to redirector.json next to RecRoom.exe. Parsed by src/core/config.c (simple key scan, not a real JSON parser -- keep it flat, one object per rewrite).",
+
+  "_rewrite_comment": "DNS lookups for an exact 'from' host are resolved as 'to' instead, so real DNS returns the target's current IP (survives dynamic IPs). Matching is EXACT -- list each host you want redirected.",
+  "rewrite": [
+    { "from": "ns.rec.net", "to": "ns.recflare.net" }
+  ]
+}
