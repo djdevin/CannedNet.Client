@@ -16,6 +16,14 @@
 #include "http_rewrite.h"
 #include "memcheck_patch.h"
 #include "eac_patch.h"
+#include "photon_patch.h"
+#include "quit_trace.h"
+#include "filesig_patch.h"
+#include "hwbp.h"
+#include "antitamper_patch.h"
+#include "crash_handler.h"
+#include "module_hide.h"
+#include "retspoof.h"
 
 
 
@@ -143,7 +151,14 @@ BOOL InstallHooks()
     // Install DNS hook
     //
 
-    if(real_getaddrinfo)
+    if(!enable_dns)
+    {
+        // Safety net only: with the SendRequest host rewrite active the client already asks for real
+        // *.recflare.net names. Skipping this leaves ZERO inline byte patches in the process, which
+        // is how we test whether our patching is what the protector reacts to.
+        Log("[HOOK] DNS hook disabled via config -- no inline patches will be installed");
+    }
+    else if(real_getaddrinfo)
     {
         Log(
             "[HOOK] Installing getaddrinfo"
@@ -235,6 +250,25 @@ DWORD WINAPI HookThread(
         MyExceptionHandler
     );
 
+    // Diagnostics are observers, but a first-in-chain VEH plus a probe that suspends the main
+    // thread every 3s can themselves perturb a protected process -- keep them switchable so a
+    // measurement can exclude them.
+    if(enable_diag)
+    {
+        InstallCrashHandler();
+
+        // Establish once per run whether hardware breakpoints are usable in this process at all.
+        // Only touches our own code, so it is safe even with use_hwbp off (the default).
+        HwbpSelfTest();
+
+        // Watch for a main-thread stall.
+        StartHangProbe();
+    }
+    else
+    {
+        Log("[DIAG] diagnostics disabled via config (no AV logger, no hang probe, no HWBP self-test)");
+    }
+
 
     Log(
         "[THREAD] Hook thread started"
@@ -276,9 +310,12 @@ DWORD WINAPI HookThread(
 
 
     //
-    // Wait for Unity. If this isn't the game process (EAC launcher, crash handler, ...), bail so we
-    // don't spin forever or install hooks where they don't belong.
+    // Optionally unlink ourselves from the PEB loader lists. Best current guess at what Themida's
+    // ~35s anti-tamper check flags: a foreign module in the loader list. Done right after config so
+    // it happens before the game's periodic scans get going. `param` is our own HMODULE from DllMain.
     //
+    if(hide_module)
+        HideModuleFromPeb((HMODULE)param);
 
     if(!WaitForUnity())
         return 0;
@@ -301,6 +338,31 @@ DWORD WINAPI HookThread(
 
         return 1;
     }
+
+
+
+    //
+    // Return-address spoofing gadget scan. Started before every other il2cpp patch: http_rewrite.c and
+    // photon_patch.c route their il2cpp utility calls (string_new, object_new, Uri..ctor, get/set_Uri)
+    // through SpoofCall4 so those calls don't show redirector.dll on the stack. The scan itself only
+    // takes tens of ms once GameAssembly's code is decrypted, but starting it first gives it the most
+    // lead time before real traffic starts flowing through the hooks that depend on it. SpoofCall4
+    // falls back to a plain call if the scan hasn't finished yet, so nothing blocks on this thread.
+    //
+
+    HANDLE spoofThread =
+        CreateThread(
+            NULL,
+            0,
+            PatchRetSpoof,
+            NULL,
+            0,
+            NULL
+        );
+
+
+    if(spoofThread)
+        CloseHandle(spoofThread);
 
 
 
@@ -335,20 +397,27 @@ DWORD WINAPI HookThread(
     // fails the handshake (mismatched/pinned cert).
     //
 
-    HANDLE sslThread =
-        CreateThread(
-            NULL,
-            0,
-            (LPTHREAD_START_ROUTINE)
-                PatchBestHTTPSSL,
-            NULL,
-            0,
-            NULL
-        );
+    if(enable_ssl)
+    {
+        HANDLE sslThread =
+            CreateThread(
+                NULL,
+                0,
+                (LPTHREAD_START_ROUTINE)
+                    PatchBestHTTPSSL,
+                NULL,
+                0,
+                NULL
+            );
 
 
-    if(sslThread)
-        CloseHandle(sslThread);
+        if(sslThread)
+            CloseHandle(sslThread);
+    }
+    else
+    {
+        Log("[HOOK] SSL bypass disabled via config -- skipping");
+    }
 
 
 
@@ -357,20 +426,27 @@ DWORD WINAPI HookThread(
     // the SSL patch it waits for the il2cpp runtime before resolving+hooking SendRequest.
     //
 
-    HANDLE httpThread =
-        CreateThread(
-            NULL,
-            0,
-            (LPTHREAD_START_ROUTINE)
-                PatchHttpHostRewrite,
-            NULL,
-            0,
-            NULL
-        );
+    if(enable_http)
+    {
+        HANDLE httpThread =
+            CreateThread(
+                NULL,
+                0,
+                (LPTHREAD_START_ROUTINE)
+                    PatchHttpHostRewrite,
+                NULL,
+                0,
+                NULL
+            );
 
 
-    if(httpThread)
-        CloseHandle(httpThread);
+        if(httpThread)
+            CloseHandle(httpThread);
+    }
+    else
+    {
+        Log("[HOOK] HTTP host rewrite disabled via config -- skipping");
+    }
 
 
 
@@ -393,6 +469,115 @@ DWORD WINAPI HookThread(
 
     if(eacThread)
         CloseHandle(eacThread);
+
+
+
+    //
+    // Photon app-id injection. Own thread; waits for GameAssembly then detours the Photon connect seam
+    // to fill in the operator's Photon Cloud app IDs (empty otherwise -> InvalidAuthentication ~30s in).
+    //
+
+    if(enable_photon)
+    {
+        HANDLE photonThread =
+            CreateThread(
+                NULL,
+                0,
+                (LPTHREAD_START_ROUTINE)
+                    PatchPhotonAppId,
+                NULL,
+                0,
+                NULL
+            );
+
+
+        if(photonThread)
+            CloseHandle(photonThread);
+    }
+    else
+    {
+        Log("[HOOK] Photon app-id injection disabled via config -- skipping");
+    }
+
+
+
+    //
+    // File-signature-check neutraliser. Own thread; waits for GameAssembly then detours the
+    // file_sig_check P/Invoke whose unresolved native pointer is what actually crashes the process
+    // ~35s in (see src/unity/filesig_patch.c for the full evidence chain).
+    //
+
+    HANDLE fileSigThread =
+        CreateThread(
+            NULL,
+            0,
+            (LPTHREAD_START_ROUTINE)
+                PatchFileSigCheck,
+            NULL,
+            0,
+            NULL
+        );
+
+
+    if(fileSigThread)
+        CloseHandle(fileSigThread);
+
+
+
+    //
+    // Anti-tamper report funnel suppression. Own thread; waits for GameAssembly then detours the tamper
+    // funnel so ImageSignature (placeholder CDN sig) + our own hooks don't create a Hile warning that
+    // POSTs api/PlayerReporting/v1/hile and force-quits ~30s in.
+    //
+
+    // TEMPORARILY DISABLED for crash isolation: does the 0xC0000005 go away without the funnel's
+    // null-return?
+    #if 0
+    HANDLE antitamperThread =
+        CreateThread(
+            NULL,
+            0,
+            (LPTHREAD_START_ROUTINE)
+                PatchAntiTamper,
+            NULL,
+            0,
+            NULL
+        );
+
+
+    if(antitamperThread)
+        CloseHandle(antitamperThread);
+    #endif
+
+
+
+    //
+    // Application.Quit tracer. Own thread; waits for GameAssembly then detours both Quit overloads to
+    // log the managed caller (map with il2cpp-tools/whatis.py) and, when "blockQuit" is set in
+    // redirector.json, swallow the shutdown. This is what identifies WHO ends the session ~11s in --
+    // Player.log stops at PhotonNetwork.Disconnect() without ever naming a reason.
+    //
+
+    // DISABLED: it did its job -- both Application.Quit overloads and TerminateProcess(self) NEVER
+    // fire, so the session ends in a hard crash, not a requested exit. Leaving it on would add three
+    // more inline patches to the very code the integrity scan is suspected of hashing, which would
+    // pollute the memcheck experiment. Re-enable only to re-test the exit path.
+    #if 0
+    HANDLE quitThread =
+        CreateThread(
+            NULL,
+            0,
+            (LPTHREAD_START_ROUTINE)
+                PatchQuitTrace,
+            NULL,
+            0,
+            NULL
+        );
+
+
+    if(quitThread)
+        CloseHandle(quitThread);
+    #endif
 
 
 

@@ -20,6 +20,54 @@ char *rewrite_to[MAX_REWRITES];
 int rewrite_count = 0;
 
 
+char photon_realtime_appid[64] = "";
+char photon_chat_appid[64]     = "";
+char photon_voice_appid[64]    = "";
+
+int enable_ssl    = 1;
+int enable_http   = 1;
+int enable_photon = 1;
+int enable_spoof  = 1;
+int block_quit    = 0;
+int use_hwbp      = 0;   // hardware-breakpoint hooks instead of inline detours -- see include/hwbp.h
+int enable_dns    = 1;
+int enable_diag   = 0;   // AV logger + hang probe + HWBP self-test; off by default (hang probe
+                         // suspends the main thread every 3s). "enableDiag": true to investigate.
+int hide_module   = 1;
+
+
+// Copy the JSON string value for "key" ("key" : "value") from buf into out. No-op if key absent.
+static void ScanStringKey(const char *buf, const char *quotedKey, char *out, size_t outlen)
+{
+    char *k = strstr(buf, quotedKey);
+    if(!k) return;
+    char *colon = strchr(k, ':');
+    if(!colon) return;
+    char *start = strchr(colon, '"');
+    if(!start) return;
+    start++;
+    char *end = strchr(start, '"');
+    if(!end) return;
+    size_t len = (size_t)(end - start);
+    if(len >= outlen) return;
+    memcpy(out, start, len);
+    out[len] = 0;
+}
+
+// Reads a JSON boolean value ("key": true / false) from buf into *out. No-op if key absent.
+static void ScanBoolKey(const char *buf, const char *quotedKey, int *out)
+{
+    char *k = strstr(buf, quotedKey);
+    if(!k) return;
+    char *colon = strchr(k, ':');
+    if(!colon) return;
+    colon++;
+    while(*colon == ' ' || *colon == '\t') colon++;
+    if(strncmp(colon, "false", 5) == 0) *out = 0;
+    else if(strncmp(colon, "true", 4) == 0) *out = 1;
+}
+
+
 
 void LoadConfig()
 {
@@ -395,8 +443,44 @@ void LoadConfig()
 
 
 
+    //
+    // Photon Cloud app IDs (optional; injected into AppSettings at connect time).
+    //
+    ScanStringKey(buffer, "\"photonRealtimeAppId\"", photon_realtime_appid, sizeof(photon_realtime_appid));
+    ScanStringKey(buffer, "\"photonChatAppId\"",     photon_chat_appid,     sizeof(photon_chat_appid));
+    ScanStringKey(buffer, "\"photonVoiceAppId\"",    photon_voice_appid,    sizeof(photon_voice_appid));
+
+    //
+    // Per-hook bisection toggles (all default on). e.g. {"enableSsl": false} to test with the SSL
+    // bypass hook disabled.
+    //
+    ScanBoolKey(buffer, "\"enableSsl\"",    &enable_ssl);
+    ScanBoolKey(buffer, "\"enableHttp\"",   &enable_http);
+    ScanBoolKey(buffer, "\"enablePhoton\"", &enable_photon);
+    ScanBoolKey(buffer, "\"enableSpoof\"",  &enable_spoof);
+    ScanBoolKey(buffer, "\"blockQuit\"",    &block_quit);
+    ScanBoolKey(buffer, "\"useHwbp\"",      &use_hwbp);
+    ScanBoolKey(buffer, "\"enableDns\"",    &enable_dns);
+    ScanBoolKey(buffer, "\"enableDiag\"",   &enable_diag);
+    ScanBoolKey(buffer, "\"hideModule\"",   &hide_module);
+
+
     free(buffer);
 
+
+
+    Log(
+        "[CONFIG] Photon app ids: realtime=%s chat=%s voice=%s",
+        photon_realtime_appid[0] ? photon_realtime_appid : "(none)",
+        photon_chat_appid[0]     ? photon_chat_appid     : "(none)",
+        photon_voice_appid[0]    ? photon_voice_appid    : "(none)"
+    );
+
+
+    Log(
+        "[CONFIG] patches: ssl=%d http=%d photon=%d spoof=%d blockQuit=%d useHwbp=%d dns=%d diag=%d hide=%d",
+        enable_ssl, enable_http, enable_photon, enable_spoof, block_quit, use_hwbp, enable_dns, enable_diag, hide_module
+    );
 
 
     Log(

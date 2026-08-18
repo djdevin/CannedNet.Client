@@ -2,6 +2,8 @@
 #include "ssl_patch.h"
 #include "logger.h"
 #include "detour.h"
+#include "hwbp.h"
+#include "config.h"
 
 //
 // Native TLS pinning bypass.
@@ -85,6 +87,28 @@ static BOOL ResolveIl2CppApi(HMODULE ga)
            p_class_from_name && p_class_get_method_from_name;
 }
 
+//
+// Hardcoded fallback: on the recflare-client-unstable build (Rec Room 2025-04-29) GameAssembly.dll has
+// NO export table at all (stripped; confirmed RVA=0 even at runtime), so the il2cpp reflection API is
+// unreachable. That build's code/metadata are decrypted in memory but the framework method addresses
+// are known from the matching Cpp2IL dump (RecRoom_Info/Code/2025-04-29_02-57-34). Since this is a dead
+// game with no future release, we hardcode the RVA. VA at runtime = GameAssembly_base + RVA.
+// LegacyTlsAuthentication.NotifyServerCertificate(Certificate) = RVA 0x71CFD00 (vtable slot 6).
+//
+#define NOTIFY_SERVER_CERT_RVA 0x71CFD00
+
+// Spin until the byte at `p` looks like decrypted code rather than a zero/int3 fill (the packer
+// decrypts .text shortly after the module maps).
+static void WaitForCode(const BYTE *p)
+{
+    for (int i = 0; i < 600; i++)   // ~60s cap
+    {
+        BYTE b = p[0];
+        if (b != 0x00 && b != 0xCC) return;
+        Sleep(100);
+    }
+}
+
 void PatchBestHTTPSSL(void)
 {
     //
@@ -100,7 +124,37 @@ void PatchBestHTTPSSL(void)
 
     if (!ResolveIl2CppApi(ga))
     {
-        Log("[SSL] missing il2cpp exports -- aborting TLS patch");
+        //
+        // No il2cpp exports (this build). Fall back to the hardcoded RVA: detour the compiled
+        // NotifyServerCertificate entry directly. This is a replace-only hook (we never call the
+        // original), so no il2cpp API, thread-attach, or metadata is required at all.
+        //
+        Log("[SSL] no il2cpp exports -- using hardcoded RVA 0x%X (build 2025-04-29)", NOTIFY_SERVER_CERT_RVA);
+        BYTE *code = (BYTE *)ga + NOTIFY_SERVER_CERT_RVA;
+        WaitForCode(code);
+        Log("[SSL] NotifyServerCertificate code=%p prologue=%02X %02X %02X %02X",
+            code, code[0], code[1], code[2], code[3]);
+
+        //
+        // Prefer a hardware breakpoint: it writes no bytes, so a native integrity check hashing
+        // GameAssembly.dll's .text can't see it (see hwbp.h). This is a replace-only hook -- the
+        // hook just returns, which from the breakpoint's perspective returns straight to the
+        // game's caller, so no HwbpSkipOnce is needed here.
+        //
+        if (use_hwbp)
+        {
+            if (HwbpAdd(HWBP_SLOT_SSL, code, ReplNotifyServerCertificate))
+            {
+                Log("[SSL] TLS pinning bypassed via HWBP (no bytes patched)");
+                return;
+            }
+            Log("[SSL] HWBP arm failed -- falling back to inline detour");
+        }
+
+        if (InstallDetour(code, ReplNotifyServerCertificate, backup_notify, NULL))
+            Log("[SSL] TLS pinning bypassed via RVA (NotifyServerCertificate -> accept-all)");
+        else
+            Log("[SSL] failed to install NotifyServerCertificate detour (RVA path)");
         return;
     }
     Log("[SSL] il2cpp API resolved");

@@ -4,6 +4,9 @@
 #include "config.h"
 #include "strings.h"
 #include "detour.h"
+#include "retspoof.h"
+#include "hwbp.h"
+#include "crash_handler.h"
 
 //
 // HTTP-layer host rewrite.
@@ -52,6 +55,16 @@ static void *m_Uri_ctor;         // Uri..ctor(string)
 typedef void* (*SendRequest_t)(void *req, void *method);
 static SendRequest_t original_SendRequest;
 static BYTE backup_sendrequest[32];
+
+// HWBP call-through: the target's bytes are untouched, so "the original" is just the target address
+// itself -- but calling it would re-trap, hence the one-shot skip. original_SendRequest is aimed at
+// this shim when the hardware-breakpoint path is used, keeping every call site identical.
+static SendRequest_t g_realSendRequest;
+static void* SendRequestViaHwbp(void *req, void *method)
+{
+    HwbpSkipOnce(HWBP_SLOT_HTTP);
+    return g_realSendRequest(req, method);
+}
 
 
 static void* FindClass(void *domain, const char *ns, const char *name)
@@ -165,6 +178,265 @@ static void* SendRequestHook(void *req, void *method)
     return original_SendRequest(req, method);
 }
 
+// ============================================================================
+// Hardcoded-RVA path for the recflare-client-unstable build (Rec Room 2025-04-29).
+//
+// GameAssembly.dll on this build has NO export table (stripped), so the reflection API above is
+// unreachable. Everything here is resolved by hardcoded address instead:
+//   - il2cpp_string_new / il2cpp_object_new: found by byte-signature scan of the decrypted libil2cpp
+//     (Pistol Whip 2021.3.7, metadata v29 == ours, was the reference). See memory note
+//     unstable-build-identity-rvas. VA = GameAssembly_base + RVA.
+//   - SendRequest(HTTPRequest): RVA from the matching Cpp2IL dump (2025-04-29).
+//   - HTTPRequest.Uri is read/written as a FIELD (offset 0x168) -- no get_Uri/set_Uri needed.
+//   - Uri..ctor(string) is resolved by WALKING the Uri Il2CppClass method table at runtime (struct
+//     offsets from Pistol Whip il2cpp.h), since it's a framework method whose body doesn't
+//     signature-scan. The Uri class comes from the live object header (*(void**)uri).
+// The hook runs on the game's own il2cpp/GC thread (it's the caller of SendRequest), so no
+// thread_attach is needed.
+// ============================================================================
+#define SENDREQUEST_RVA  0x71D7BE0
+#define STRING_NEW_RVA   0x8D9EA0
+#define OBJECT_NEW_RVA   0x8E1460
+
+// HTTPRequest.Uri auto-property accessors (RecRoom methods -> RVAs from our build's dump). They ignore
+// MethodInfo, so a NULL trailing arg is fine.
+#define GET_URI_RVA      0x9C9460  // HTTPRequest.get_Uri() -> Uri
+#define SET_URI_RVA      0x9C91D0  // HTTPRequest.set_Uri(Uri)
+
+typedef void* (*get_uri_fn_t)(void* thisp, void* mi);
+typedef void  (*set_uri_fn_t)(void* thisp, void* uri, void* mi);
+static get_uri_fn_t g_get_uri;
+static set_uri_fn_t g_set_uri;
+
+#define URI_MSTRING_OFF 0x10  // System.Uri.m_String (reliable instance-field offset; reads the URL)
+#define STR_LEN_OFF    0x10   // Il2CppString.length (int32)
+#define STR_CHARS_OFF  0x14   // Il2CppString.chars (utf16)
+
+// Shuffled Il2CppClass / MethodInfo offsets on this build (found empirically, see memory note):
+#define CLASS_METHODS_OFF   0x60   // Il2CppClass.methods (MethodInfo** array)
+#define MI_METHODPTR_OFF    0x10   // MethodInfo.methodPointer, XOR-obfuscated (== virtualMethodPointer@0x48)
+#define MI_NAME_OFF         0x30   // MethodInfo.name (const char*)
+#define MI_PARAMCOUNT_OFF   0x51   // MethodInfo.parameters_count (uint8)
+
+typedef void* (*string_new_fn_t)(const char*);
+typedef void* (*object_new_fn_t)(void*);
+typedef void  (*uri_ctor_fn_t)(void* thisUri, void* strArg, void* methodInfo);
+static string_new_fn_t g_string_new;
+static object_new_fn_t g_object_new;
+
+static int SafeReadAscii(const char *p, char *out, int n);   // fwd
+
+// Recovered at runtime: the global XOR key that deobfuscates MethodInfo.methodPointer
+// (real_VA = *(u64*)(mi+0x10) ^ key), plus the resolved Uri..ctor(string) target.
+static uint64_t g_mp_key;
+static void    *g_uri_ctor_entry;   // decrypted compiled entry of Uri..ctor(string)
+static void    *g_uri_ctor_mi;      // its MethodInfo* (il2cpp instance methods take MethodInfo* last)
+static void    *g_uri_class;        // System.Uri Il2CppClass*
+
+// Walk a shuffled Il2CppClass' method table for `name` with parameters_count==pc (pc<0 = any); returns
+// the MethodInfo*, or NULL. SEH-guarded against torn reads.
+static void* FindMethod(void *klass, const char *name, int pc)
+{
+    void **methods;
+    __try { methods = *(void ***)((BYTE *)klass + CLASS_METHODS_OFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    if (!methods) return NULL;
+    for (int i = 0; i < 500; i++)
+    {
+        void *mi;
+        __try { mi = methods[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        if (!mi) break;
+        const char *nm; uint8_t mc;
+        __try { nm = *(const char **)((BYTE *)mi + MI_NAME_OFF); mc = *(uint8_t *)((BYTE *)mi + MI_PARAMCOUNT_OFF); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
+        char s[48];
+        if (!SafeReadAscii(nm, s, sizeof(s))) continue;
+        if (strcmp(s, name) != 0) continue;
+        if (pc >= 0 && mc != (uint8_t)pc) continue;
+        return mi;
+    }
+    return NULL;
+}
+
+// Spin until the byte at p is decrypted code (packer decrypts .text shortly after the module maps).
+static void HttpWaitForCode(const BYTE *p)
+{
+    for (int i = 0; i < 600; i++) { BYTE b = p[0]; if (b != 0x00 && b != 0xCC) return; Sleep(100); }
+}
+
+// SEH-safe: copy up to n-1 printable-ASCII chars from p; 1 if it looked like a C string, else 0.
+static int SafeReadAscii(const char *p, char *out, int n)
+{
+    if (!p) return 0;
+    __try {
+        for (int j = 0; j < n - 1; j++) {
+            char c = p[j];
+            if (c == 0) { out[j] = 0; return j > 0; }
+            if (c < 0x20 || c > 0x7e) return 0;
+            out[j] = c;
+        }
+        out[n - 1] = 0; return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+// Read an il2cpp string's ASCII into out (SEH-safe). Returns length, or -1 on failure.
+static int ReadIl2CppAscii(void *str, char *out, int cap)
+{
+    __try {
+        if (!str) return -1;
+        int len = *(int *)((BYTE *)str + STR_LEN_OFF);
+        if (len < 0 || len >= cap) return -1;
+        uint16_t *w = (uint16_t *)((BYTE *)str + STR_CHARS_OFF);
+        for (int i = 0; i < len; i++) out[i] = (w[i] < 0x80) ? (char)w[i] : '?';
+        out[len] = 0;
+        return len;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+// Extract the host component from an absolute URL into host[].
+static int UrlHost(const char *url, char *host, size_t cap)
+{
+    const char *p = strstr(url, "://");
+    if (!p) return 0;
+    p += 3;
+    const char *e = p;
+    while (*e && *e != '/' && *e != ':') e++;
+    size_t hl = (size_t)(e - p);
+    if (hl == 0 || hl >= cap) return 0;
+    memcpy(host, p, hl); host[hl] = 0;
+    return 1;
+}
+
+// Deobfuscate a MethodInfo's compiled entry. This build XOR-obfuscates MethodInfo.methodPointer with a
+// global key: real_VA = *(u64*)(mi + 0x10) ^ key. We recover the key from get_Uri (whose real RVA we
+// know), then apply it to any other MethodInfo. Returns the decrypted entry, or NULL.
+static void* DecryptMethodPtr(void *mi)
+{
+    if (!g_mp_key || !mi) return NULL;
+    uint64_t enc;
+    __try { enc = *(uint64_t *)((BYTE *)mi + MI_METHODPTR_OFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    return (void *)(uintptr_t)(enc ^ g_mp_key);
+}
+
+// One-time resolve: derive the key from get_Uri in HTTPRequest's class, then decrypt Uri..ctor(string)
+// from the live Uri object's class. Returns 1 on success.
+static int ResolveUriCtor(void *req, void *uri, HMODULE ga)
+{
+    uintptr_t base = (uintptr_t)ga;
+
+    void *reqKlass = *(void **)req;
+    void *miGetUri = FindMethod(reqKlass, "get_Uri", 0);
+    if (!miGetUri) { Log("[HTTP] resolve: get_Uri MethodInfo not found"); return 0; }
+    uint64_t encGetUri;
+    __try { encGetUri = *(uint64_t *)((BYTE *)miGetUri + MI_METHODPTR_OFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    g_mp_key = encGetUri ^ (uint64_t)(base + GET_URI_RVA);
+    Log("[HTTP] methodPointer key = %llX (from get_Uri)", (unsigned long long)g_mp_key);
+
+    g_uri_class = *(void **)uri;
+    void *miCtor = FindMethod(g_uri_class, ".ctor", 1);   // Uri(string) is the sole 1-param ctor
+    if (!miCtor) { Log("[HTTP] resolve: Uri..ctor(string) MethodInfo not found"); return 0; }
+    void *entry = DecryptMethodPtr(miCtor);
+    // Sanity: entry must land inside GameAssembly's image.
+    uintptr_t rva = (uintptr_t)entry - base;
+    if (rva >= 0xE000000) { Log("[HTTP] resolve: Uri..ctor entry %p out of range (rva=%llX)", entry, (unsigned long long)rva); return 0; }
+    g_uri_ctor_entry = entry;
+    g_uri_ctor_mi    = miCtor;
+    Log("[HTTP] Uri..ctor(string) entry=%p (rva=%llX) mi=%p", entry, (unsigned long long)rva, miCtor);
+    return 1;
+}
+
+// SendRequest(HTTPRequest req, MethodInfo*) hook. DNS already routes ns.rec.net to recflare's IP; the
+// remaining problem is TLS SNI + HTTP Host header still say ns.rec.net (Cloudflare routes by those).
+// Both derive from req.Uri. So we build a fresh System.Uri from the rewritten URL and set it back --
+// a real ctor parse (no cache corruption/truncation like in-place mutation). il2cpp_string_new /
+// il2cpp_object_new come from the signature scan; Uri..ctor is resolved by decrypting its obfuscated
+// MethodInfo.methodPointer. Runs on the game's own il2cpp/GC thread, so allocation needs no attach.
+static volatile LONG g_sr_calls = 0;
+
+static void* SendRequestHookRVA(void *req, void *method)
+{
+    LONG n = InterlockedIncrement(&g_sr_calls);
+
+    // This hook runs on Unity's main thread; publish it so the hang probe knows what to sample.
+    if (!g_mainThreadId) g_mainThreadId = GetCurrentThreadId();
+
+    if (!req) return original_SendRequest(req, method);
+
+    void *uri = (void *)SpoofCall4(g_get_uri, (uint64_t)req, 0, 0, 0);
+    if (!uri) return original_SendRequest(req, method);
+
+    char url[1024];
+    if (ReadIl2CppAscii(*(void **)((BYTE *)uri + URI_MSTRING_OFF), url, sizeof(url)) < 0)
+        return original_SendRequest(req, method);
+
+    if (n <= 200) Log("[HTTP] req#%ld %s", n, url);   // DIAGNOSTIC: log every request URL
+
+    char host[256], newHost[256], newUrl[1100];
+    if (!UrlHost(url, host, sizeof(host)))            return original_SendRequest(req, method);
+    if (!RewriteHost(host, newHost, sizeof(newHost))) return original_SendRequest(req, method); // not a target
+    if (!RewriteUrlHost(url, newUrl, sizeof(newUrl))) return original_SendRequest(req, method);
+
+    if (!g_uri_ctor_entry)
+    {
+        if (!ResolveUriCtor(req, uri, GetModuleHandleA("GameAssembly.dll")))
+            return original_SendRequest(req, method);   // couldn't resolve -- leave request unchanged
+    }
+
+    __try {
+        void *newStr = (void *)SpoofCall4(g_string_new, (uint64_t)newUrl, 0, 0, 0);
+        void *newUri = (void *)SpoofCall4(g_object_new, (uint64_t)g_uri_class, 0, 0, 0);
+        if (newStr && newUri)
+        {
+            // new Uri(newUrl)
+            SpoofCall4(g_uri_ctor_entry, (uint64_t)newUri, (uint64_t)newStr, (uint64_t)g_uri_ctor_mi, 0);
+            // req.Uri = newUri
+            SpoofCall4(g_set_uri, (uint64_t)req, (uint64_t)newUri, 0, 0);
+            if (n <= 60) Log("[HTTP] %s -> %s", url, newUrl);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (n <= 60) Log("[HTTP] fresh-Uri build faulted for %s -- passing through", url);
+    }
+    return original_SendRequest(req, method);
+}
+
+// Install the hardcoded-RVA host rewrite (call-through detour on SendRequest).
+static void PatchHttpHostRewriteRVA(HMODULE ga)
+{
+    g_string_new = (string_new_fn_t)((BYTE *)ga + STRING_NEW_RVA);
+    g_object_new = (object_new_fn_t)((BYTE *)ga + OBJECT_NEW_RVA);
+    g_get_uri    = (get_uri_fn_t)((BYTE *)ga + GET_URI_RVA);
+    g_set_uri    = (set_uri_fn_t)((BYTE *)ga + SET_URI_RVA);
+
+    BYTE *code = (BYTE *)ga + SENDREQUEST_RVA;
+    HttpWaitForCode(code);
+    Log("[HTTP] RVA path (build 2025-04-29): SendRequest code=%p prologue=%02X %02X %02X %02X",
+        code, code[0], code[1], code[2], code[3]);
+
+    //
+    // Prefer a hardware breakpoint (no bytes written -- see hwbp.h). This is a call-through hook, so
+    // `original_SendRequest` is pointed at a shim that arms the one-shot pass-through and then calls
+    // the real address; every existing `original_SendRequest(...)` call site keeps working unchanged.
+    //
+    if (use_hwbp)
+    {
+        g_realSendRequest = (SendRequest_t)code;
+        if (HwbpAdd(HWBP_SLOT_HTTP, code, SendRequestHookRVA))
+        {
+            original_SendRequest = SendRequestViaHwbp;
+            Log("[HTTP] host rewrite installed on SendRequest via HWBP (no bytes patched)");
+            return;
+        }
+        Log("[HTTP] HWBP arm failed -- falling back to inline detour");
+    }
+
+    if (InstallDetour(code, SendRequestHookRVA, backup_sendrequest, (LPVOID *)&original_SendRequest))
+        Log("[HTTP] host rewrite installed on SendRequest (RVA path)");
+    else
+        Log("[HTTP] SendRequest detour refused (RVA path) -- host rewrite NOT active");
+}
+
 static BOOL ResolveApi(HMODULE ga)
 {
     p_domain_get            = (il2cpp_domain_get_t)            GetProcAddress(ga, "il2cpp_domain_get");
@@ -195,7 +467,13 @@ void PatchHttpHostRewrite(void)
     HMODULE ga = NULL;
     while (!ga) { ga = GetModuleHandleA("GameAssembly.dll"); if (!ga) Sleep(100); }
 
-    if (!ResolveApi(ga)) { Log("[HTTP] missing il2cpp exports -- aborting host rewrite"); return; }
+    if (!ResolveApi(ga))
+    {
+        // No il2cpp exports (recflare-client-unstable build) -- use the hardcoded-RVA path.
+        Log("[HTTP] no il2cpp exports -- using hardcoded RVA path (build 2025-04-29)");
+        PatchHttpHostRewriteRVA(ga);
+        return;
+    }
 
     void *domain = NULL;
     for (int i = 0; i < 600 && !domain; i++) { domain = p_domain_get(); if (!domain) Sleep(100); }

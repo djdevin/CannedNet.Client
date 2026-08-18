@@ -11,8 +11,8 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
 endif()
 
 # Where to deploy the built proxy. Point at your Rec Room install root; the deploy step below copies
-# version.dll there. That single file is the whole payload -- see the note above the deploy step.
-set(GAME_DIR "" CACHE PATH "Rec Room install root to deploy version.dll into")
+# wintrust.dll + wtrust_orig.dll there. See the note above the deploy step.
+set(GAME_DIR "" CACHE PATH "Rec Room install root to deploy wintrust.dll into")
 
 
 add_library(redirector SHARED
@@ -20,8 +20,11 @@ add_library(redirector SHARED
     src/dllmain.c
 
 
-    # Proxy loader (exports wrap the real system version.dll; DllMain starts the hook thread)
-    src/proxy/version_proxy.c
+    # No proxy source: this build defeats every app-dir plant (System32 crypto pre-load; DXGIDisplays
+    # not loaded in VR mode; UnityPlayer self-references and fail-fasts on a stub). With no anti-cheat
+    # in-process, the vector is plain injection -- tools/launcher/launcher.exe suspended-launches
+    # RecRoom.exe and LoadLibrary-injects this DLL before first instruction. DllMain (dllmain.c) starts
+    # the hook thread. No exports needed.
 
 
     # Core
@@ -76,25 +79,32 @@ target_link_libraries(
 
 
 
-# Output must be named version.dll so RecRoom.exe's VERSION.dll import resolves to us.
+# Plain injectable DLL: redirector.dll (injected by launcher.exe; no PE export/name requirement).
 set_target_properties(
     redirector PROPERTIES
 
-    OUTPUT_NAME "version"
+    OUTPUT_NAME "redirector"
     PREFIX ""
 )
 
 
-# The proxy loads the real system version.dll at runtime (see src/proxy/version_proxy.c), so there is
-# nothing extra to materialize or ship -- version.dll is fully self-contained.
+# The launcher that suspended-launches RecRoom.exe and injects redirector.dll. Built as a console EXE
+# from the same toolchain so a single `cmake --build` produces both artifacts.
+add_executable(launcher tools/launcher/launcher.c)
+set_target_properties(launcher PROPERTIES OUTPUT_NAME "launcher")
 
 
-# Optional one-step deploy: -DGAME_DIR=... to copy version.dll into the game folder after build.
-# The copy fails while Rec Room is running (DLL locked) -- close the game and rebuild.
+# Optional one-step deploy: -DGAME_DIR=... copies redirector.dll + launcher.exe into the game root.
+# The copy fails while Rec Room is running (DLLs locked) -- close the game and rebuild.
 if(GAME_DIR)
     add_custom_command(TARGET redirector POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<TARGET_FILE:redirector>" "${GAME_DIR}/version.dll"
-        COMMENT "Deploying version.dll to ${GAME_DIR}"
+                "$<TARGET_FILE:redirector>" "${GAME_DIR}/redirector.dll"
+        COMMENT "Deploying redirector.dll to ${GAME_DIR}"
+    )
+    add_custom_command(TARGET launcher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:launcher>" "${GAME_DIR}/launcher.exe"
+        COMMENT "Deploying launcher.exe to ${GAME_DIR}"
     )
 endif()

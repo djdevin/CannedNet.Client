@@ -164,12 +164,91 @@ static void* ScanHook(void *self, void *methodInfo)
     return p_invoke(g_resolvedGetter, NULL, NULL, &exc);
 }
 
+//
+// ---------------------------------------------------------------------------------------------
+// Hardcoded-RVA path for build 2025-04-29 (recflare-client-unstable).
+//
+// GameAssembly.dll on this build has no export table, so ResolveApi() fails and the shape-based
+// search above can't run at all -- the integrity scan has been completely UNPATCHED here, while we
+// carry four inline .text detours. That makes it the prime suspect for the hard 0xC0000005 in the
+// Themida-wrapped RecRoom.exe.dll ~35s in (see memory note unstable-build-identity-rvas.md).
+//
+// The scanner on this build is the static class `BLGELNMKAKM` in the Cpp2IL dump
+// (RecRoom_Info/Code/2025-04-29_02-57-34) -- identified by shape, NOT by name (CLAUDE.md gotcha 7):
+// it owns the const `"verification.sig"`, a 65536 chunk size, RSA modulus/exponent byte[] fields, and
+// the `<CheckHashesInBackground>` compiler-generated closures. NOTE the obfuscated class name recorded
+// for an older build (`CHPCJHMCKMA`) does NOT exist in this dump -- never reuse one across builds.
+//
+//   BLGELNMKAKM.JEGANAFJCLA()  RVA 0x133B720  public static, 0 params -> NCOKFFGPIJM<LOBLPLMBPEO>
+//
+// That is the promise-returning scan entry the boot step awaits (the same shape the export-based
+// search looks for above). We start as a pure WITNESS: a call-through tracer that logs entry/exit and
+// changes nothing, so we can first establish whether the scan even runs and whether it correlates
+// with the crash -- returning a bogus promise here would risk the same null-deref crash the
+// antitamper funnel hook caused. Only once that's confirmed should this become a neutralizer.
+// ---------------------------------------------------------------------------------------------
+//
+#define MEMCHECK_SCAN_RVA 0x133B720
+
+typedef void* (*scan_fn_t)(void *methodInfo);
+static scan_fn_t real_scan_rva;
+static BYTE      backup_scan_rva[32];
+
+// Static il2cpp method: MethodInfo* arrives in RCX, no declared params.
+static void* ScanTraceHook(void *methodInfo)
+{
+    Log("[MEMCHECK] *** integrity scan ENTERED (BLGELNMKAKM.JEGANAFJCLA) ***");
+    void *r = real_scan_rva(methodInfo);
+    Log("[MEMCHECK] *** integrity scan RETURNED promise=%p ***", r);
+    return r;
+}
+
+// Spin until the byte looks like decrypted code rather than a zero/int3 fill (the packer decrypts
+// .text shortly after the module maps) -- same guard as ssl_patch.c.
+static void WaitForCodeMc(const BYTE *p)
+{
+    for (int i = 0; i < 600; i++)
+    {
+        BYTE b = p[0];
+        if (b != 0x00 && b != 0xCC) return;
+        Sleep(100);
+    }
+}
+
+static void PatchMemcheckByRVA(HMODULE ga)
+{
+    (void)ga; (void)backup_scan_rva; (void)real_scan_rva;
+    (void)ScanTraceHook; (void)WaitForCodeMc;
+
+    //
+    // DISABLED -- MEMCHECK_SCAN_RVA IS WRONG FOR THIS BUILD. DO NOT RE-ENABLE AS-IS.
+    //
+    // 0x133B720 was read out of il2cpp-tools/out/dump.cs, which turned out to be a DIFFERENT BUILD
+    // than the installed client. Proof: that dump puts BestHTTP SendRequest at 0x3161AF0 and
+    // NotifyServerCertificate at 0x3F447C0, but the RVAs that actually work at runtime here are
+    // 0x71D7BE0 and 0x71CFD00. The correct dump for recflare-client-unstable is
+    // C:\Games\RecRoom_Info\Code\2025-04-29_02-57-34 (it lists SendRequest at 0x71D7BE0 -- match).
+    //
+    // Consequence: the byte at GA+0x133B720 is not a function entry on this build (observed prologue
+    // "DF C7 47 10" -- mid-instruction), so installing a detour there writes 14 bytes into the middle
+    // of unrelated code. The tracer never fired because nothing calls that address.
+    //
+    // Also: `CheckHashesInBackground` / `verification.sig` / class `BLGELNMKAKM` DO NOT EXIST in the
+    // correct dump, so the managed file-hash scanner those names came from is not present in this
+    // build at all. The integrity check that matters here is very likely NATIVE, inside the
+    // Themida-wrapped RecRoom.exe.dll -- which is exactly the module the fatal 0xC0000005 lands in.
+    // Re-deriving a scan entry from the CORRECT dump is the prerequisite for any RVA hook here.
+    //
+    Log("[MEMCHECK] no il2cpp exports and no verified scan RVA for this build -- not hooking "
+        "(see src/unity/memcheck_patch.c: out/dump.cs is the WRONG build)");
+}
+
 void PatchMemoryIntegrityCheck(void)
 {
     HMODULE ga = NULL;
     while (!ga) { ga = GetModuleHandleA("GameAssembly.dll"); if (!ga) Sleep(100); }
 
-    if (!ResolveApi(ga)) { Log("[MEMCHECK] missing il2cpp exports -- aborting"); return; }
+    if (!ResolveApi(ga)) { PatchMemcheckByRVA(ga); return; }
 
     void *domain = NULL;
     for (int i = 0; i < 600 && !domain; i++) { domain = p_domain_get(); if (!domain) Sleep(100); }
