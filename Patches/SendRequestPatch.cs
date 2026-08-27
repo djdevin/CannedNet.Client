@@ -64,13 +64,13 @@ public class SendRequestPatch
             var host = request.Uri.Host;
             if (host == OfficialNameServer)
             {
-                // Redirect the nameserver lookup to the custom server, swapping only the host.
-                var newHost = new System.Uri(Plugin.ServerHostname.Value).Host;
-                var builder = new Il2CppSystem.UriBuilder(request.Uri) { Host = newHost };
+                // Redirect the nameserver lookup to the custom server.
+                var newUri = new System.Uri(Plugin.ServerHostname.Value);
+                var builder = new Il2CppSystem.UriBuilder(request.Uri) { Host = newUri.Host, Port = newUri.Port };
                 request.Uri = builder.Uri;
 
                 if (debug)
-                    Plugin.Log.LogInfo($"[HTTP] intercepted {host} -> {newHost}");
+                    Plugin.Log.LogInfo($"[HTTP] intercepted {host}:{request.Uri.Port} -> {newUri.Host}:{newUri.Port}");
             }
 
             if (debug)
